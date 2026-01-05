@@ -4,6 +4,7 @@ from discord.ext import commands
 import json
 import os
 import asyncio
+import aiohttp
 from flask import Flask
 from threading import Thread
 
@@ -20,8 +21,8 @@ def keep_alive():
 TOKEN = os.getenv("TOKEN")
 DATA_FILE = "codes.json"
 
-# 1. PASTE YOUR LOG CHANNEL ID HERE
-LOG_CHANNEL_ID = 1457623750475387136 
+# 1. PASTE YOUR WEBHOOK URL HERE
+WEBHOOK_URL = "YOUR_WEBHOOK_URL_HERE"
 
 def load_data():
     if not os.path.exists(DATA_FILE): return {}
@@ -31,6 +32,11 @@ def load_data():
 
 def save_data(data):
     with open(DATA_FILE, "w") as f: json.dump(data, f, indent=4)
+
+async def send_webhook_log(content=None, embed=None):
+    async with aiohttp.ClientSession() as session:
+        webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
+        await webhook.send(content=content, embed=embed, username="Tech4U Logs")
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -48,30 +54,26 @@ async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/redeem | Tech4U"))
     print(f'Logged in as {bot.user}')
 
-# --- ADMIN: ADD CODE (With Service, Email, Password) ---
-@bot.tree.command(name="addcode", description="Add a new account code (Admin Only)")
+# --- ADMIN: ADD CODE ---
+@bot.tree.command(name="addcode", description="Add account details to a code (Admin Only)")
 async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("❌ No permission.", ephemeral=True)
     
     data = load_data()
-    data[code] = {
-        "service": service, 
-        "email": email, 
-        "password": password
-    }
+    data[code] = {"service": service, "email": email, "password": password}
     save_data(data)
     await interaction.response.send_message(f"✅ Code `{code}` registered for **{service}**.", ephemeral=True)
 
-# --- USER: REDEEM (Creates Temp Channel with Full Info) ---
-@bot.tree.command(name="redeem", description="Redeem your account in a private temp channel")
+# --- USER: REDEEM (CREATES PRIVATE CHANNEL) ---
+@bot.tree.command(name="redeem", description="Redeem code in a private 10-minute channel")
 async def redeem(interaction: discord.Interaction, code: str):
     data = load_data()
     
     if code not in data:
-        return await interaction.response.send_message("❌ Invalid or used code!", ephemeral=True)
+        return await interaction.response.send_message("❌ Invalid or already used code!", ephemeral=True)
 
-    # Remove code immediately to prevent double-use
+    # Remove code immediately
     item = data.pop(code)
     save_data(data)
 
@@ -81,30 +83,46 @@ async def redeem(interaction: discord.Interaction, code: str):
         guild = interaction.guild
         member = interaction.user
 
-        # Set permissions: User can view but NOT send messages
+        # Set private permissions
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             member: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
         }
 
-        # Create the private channel
+        # Create Private Channel
         channel_name = f"🎁-redeem-{member.name}"
-        temp_channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
+        temp_chan = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
 
-        # Build the Reward Embed
-        embed = discord.Embed(title="🎁 Your Account is Ready!", color=discord.Color.green())
+        # Create Reward Embed
+        embed = discord.Embed(title="🎁 Account Details", color=discord.Color.green())
         embed.add_field(name="Service", value=f"**{item['service']}**", inline=False)
-        embed.add_field(name="Email", value=f"`{item['email']}`", inline=True)
+        embed.add_field(name="Email/ID", value=f"`{item['email']}`", inline=True)
         embed.add_field(name="Password", value=f"`{item['password']}`", inline=True)
-        embed.description = "⏰ **This channel will be deleted in 10 minutes.** Save your info now!"
-        embed.set_footer(text="Tech4U - Fast & Secure")
+        embed.description = "⚠️ **Note:** This channel will delete itself in **10 minutes**. Save your info!"
+        embed.set_footer(text="Thank you for using Tech4U!")
         
-        await temp_channel.send(content=member.mention, embed=embed)
+        await temp_chan.send(content=member.mention, embed=embed)
 
-        # Log redemption
-        if LOG_CHANNEL_ID != 0:
-            log_chan = bot.get_channel(LOG_CHANNEL_ID)
+        # Send Webhook Log
+        log_embed = discord.Embed(title="📜 Redemption Log", color=discord.Color.blue())
+        log_embed.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
+        log_embed.add_field(name="Code", value=f"`{code}`", inline=True)
+        log_embed.add_field(name="Item", value=item['service'], inline=False)
+        await send_webhook_log(embed=log_embed)
+
+        await interaction.followup.send(f"✅ Code accepted! Check your private channel here: {temp_chan.mention}", ephemeral=True)
+
+        # Delete after 10 minutes
+        await asyncio.sleep(600)
+        await temp_chan.delete(reason="Temporary redemption channel expired.")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        await interaction.followup.send("❌ Error creating channel. Make sure the bot has 'Manage Channels' permission!", ephemeral=True)
+
+keep_alive()
+bot.run(TOKEN)            log_chan = bot.get_channel(LOG_CHANNEL_ID)
             if log_chan:
                 log_embed = discord.Embed(title="📜 Log: Code Redeemed", color=discord.Color.blue())
                 log_embed.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
