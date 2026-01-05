@@ -22,7 +22,7 @@ TOKEN = os.getenv("TOKEN")
 DATA_FILE = "codes.json"
 
 # 1. PASTE YOUR WEBHOOK URL HERE
-WEBHOOK_URL = "YOUR_WEBHOOK_URL_HERE"
+WEBHOOK_URL = https://discord.com/api/webhooks/1457635950942490645/fD3vFDv7IExZcZqEp6rLNd0cy1RM_Ccjv53o4Ne64HUhV5WRAmyKWpc7ph9J7lIMthD8
 
 def load_data():
     if not os.path.exists(DATA_FILE): return {}
@@ -51,8 +51,20 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Game(name="/redeem | Tech4U"))
+    await bot.change_presence(activity=discord.Game(name="/help | Tech4U"))
     print(f'Logged in as {bot.user}')
+
+# --- NEW HELP COMMAND ---
+@bot.tree.command(name="help", description="Learn how to use the Tech4U Redeem System")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(title="🛡️ Tech4U Help Center", color=discord.Color.blue())
+    embed.description = "Follow these steps to get your account:"
+    embed.add_field(name="1️⃣ Find a Code", value="Complete the GP Link provided by the admin to get your secret code.", inline=False)
+    embed.add_field(name="2️⃣ Redeem the Code", value="Type `/redeem code:[your_code]` in this server.", inline=False)
+    embed.add_field(name="3️⃣ Private Channel", value="The bot will create a **private channel** for you. Go there to see your login details!", inline=False)
+    embed.add_field(name="⚠️ Note", value="The private channel will delete itself after **10 minutes**. Please save your info fast!", inline=False)
+    embed.set_footer(text="Tech4U - Fast, Secure, & Automatic")
+    await interaction.response.send_message(embed=embed)
 
 # --- ADMIN: ADD CODE ---
 @bot.tree.command(name="addcode", description="Add account details to a code (Admin Only)")
@@ -73,7 +85,7 @@ async def redeem(interaction: discord.Interaction, code: str):
     if code not in data:
         return await interaction.response.send_message("❌ Invalid or already used code!", ephemeral=True)
 
-    # Remove code immediately
+    # Remove code immediately from database
     item = data.pop(code)
     save_data(data)
 
@@ -83,62 +95,43 @@ async def redeem(interaction: discord.Interaction, code: str):
         guild = interaction.guild
         member = interaction.user
 
-        # Set private permissions
+        # Create private permissions (User can read, but NOT chat)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             member: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
         }
 
-        # Create Private Channel
+        # Create the private channel
         channel_name = f"🎁-redeem-{member.name}"
         temp_chan = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
 
-        # Create Reward Embed
-        embed = discord.Embed(title="🎁 Account Details", color=discord.Color.green())
+        # Create Reward Message
+        embed = discord.Embed(title="🎁 Account Details Delivered!", color=discord.Color.green())
         embed.add_field(name="Service", value=f"**{item['service']}**", inline=False)
         embed.add_field(name="Email/ID", value=f"`{item['email']}`", inline=True)
         embed.add_field(name="Password", value=f"`{item['password']}`", inline=True)
-        embed.description = "⚠️ **Note:** This channel will delete itself in **10 minutes**. Save your info!"
+        embed.description = "⏰ **This channel will delete itself in 10 minutes.**"
         embed.set_footer(text="Thank you for using Tech4U!")
         
         await temp_chan.send(content=member.mention, embed=embed)
 
         # Send Webhook Log
-        log_embed = discord.Embed(title="📜 Redemption Log", color=discord.Color.blue())
+        log_embed = discord.Embed(title="📜 New Redemption", color=discord.Color.blue())
         log_embed.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
-        log_embed.add_field(name="Code", value=f"`{code}`", inline=True)
-        log_embed.add_field(name="Item", value=item['service'], inline=False)
+        log_embed.add_field(name="Item", value=item['service'], inline=True)
+        log_embed.add_field(name="Code Used", value=f"`{code}`", inline=False)
         await send_webhook_log(embed=log_embed)
 
-        await interaction.followup.send(f"✅ Code accepted! Check your private channel here: {temp_chan.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Success! Please check your private channel: {temp_chan.mention}", ephemeral=True)
 
-        # Delete after 10 minutes
+        # Wait 10 minutes then delete channel
         await asyncio.sleep(600)
         await temp_chan.delete(reason="Temporary redemption channel expired.")
 
     except Exception as e:
         print(f"Error: {e}")
-        await interaction.followup.send("❌ Error creating channel. Make sure the bot has 'Manage Channels' permission!", ephemeral=True)
-
-keep_alive()
-bot.run(TOKEN)            log_chan = bot.get_channel(LOG_CHANNEL_ID)
-            if log_chan:
-                log_embed = discord.Embed(title="📜 Log: Code Redeemed", color=discord.Color.blue())
-                log_embed.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
-                log_embed.add_field(name="Service", value=item['service'], inline=True)
-                log_embed.add_field(name="Code", value=f"`{code}`", inline=False)
-                await log_chan.send(embed=log_embed)
-
-        await interaction.followup.send(f"✅ Code accepted! Go to {temp_channel.mention} for your account.", ephemeral=True)
-
-        # Wait 10 minutes then delete
-        await asyncio.sleep(600)
-        await temp_channel.delete(reason="Temp channel expired")
-
-    except Exception as e:
-        print(e)
-        await interaction.followup.send("❌ Error creating channel. Please contact an admin.", ephemeral=True)
+        await interaction.followup.send("❌ Bot error. Please check permissions or contact Admin.", ephemeral=True)
 
 keep_alive()
 bot.run(TOKEN)
