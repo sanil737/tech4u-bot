@@ -22,7 +22,7 @@ TOKEN = os.getenv("TOKEN")
 DATA_FILE = "codes.json"
 
 # 1. PASTE YOUR WEBHOOK URL HERE
-WEBHOOK_URL = https://discord.com/api/webhooks/1457635950942490645/fD3vFDv7IExZcZqEp6rLNd0cy1RM_Ccjv53o4Ne64HUhV5WRAmyKWpc7ph9J7lIMthD8
+WEBHOOK_URL = "https://discord.com/api/webhooks/1457635950942490645/fD3vFDv7IExZcZqEp6rLNd0cy1RM_Ccjv53o4Ne64HUhV5WRAmyKWpc7ph9J7lIMthD8"
 
 def load_data():
     if not os.path.exists(DATA_FILE): return {}
