@@ -56,8 +56,8 @@ async def on_message(message):
             if vouch_col.find_one({"_id": uid}).get("permits", 0) == 0:
                 await message.channel.set_permissions(message.author, send_messages=False)
         else:
-            await message.delete()
-            await message.channel.send(f"❌ {message.author.mention}, redeem a code first!", delete_after=5)
+            try: await message.delete()
+            except: pass
 
 # --- ADMIN COMMANDS ---
 @bot.tree.command(name="announce", description="Send a professional announcement")
