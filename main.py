@@ -6,7 +6,7 @@ import os
 from flask import Flask
 from threading import Thread
 
-# --- KEEP ALIVE SERVER FOR RENDER ---
+# --- KEEP ALIVE ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is running!"
@@ -15,27 +15,30 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- BOT CONFIGURATION ---
+# --- CONFIG ---
 TOKEN = os.getenv("TOKEN")
 DATA_FILE = "codes.json"
 
-# 1. PASTE YOUR LOG CHANNEL ID HERE (Example: 123456789012345678)
+# 1. PASTE YOUR LOG CHANNEL ID HERE
 LOG_CHANNEL_ID = 1457623750475387136
 
-def load_codes():
-    if not os.path.exists(DATA_FILE): return {}
-    with open(DATA_FILE, "r") as f: return json.load(f)
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
-def save_codes(codes):
-    with open(DATA_FILE, "w") as f: json.dump(codes, f, indent=4)
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
-        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
-
     async def setup_hook(self):
         await self.tree.sync()
 
@@ -43,71 +46,61 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
+    await bot.change_presence(activity=discord.Game(name="/help | Tech4U"))
     print(f'Logged in as {bot.user}')
 
-# --- ADMIN COMMAND: ADD CODE ---
-@bot.tree.command(name="addcode", description="Add a new redeem code (Admin Only)")
-async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    
-    codes = load_codes()
-    codes[code] = {"service": service, "email": email, "password": password}
-    save_codes(codes)
-    await interaction.response.send_message(f"✅ Code `{code}` added for **{service}**.", ephemeral=True)
+# --- HELP ---
+@bot.tree.command(name="help", description="How to use the bot")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(title="🛡️ Tech4U System", color=discord.Color.blue())
+    embed.description = "1. Get code from GP Link\n2. Use `/redeem` here\n3. Get reward in DM"
+    await interaction.response.send_message(embed=embed)
 
-# --- NEW ADMIN COMMAND: VIEW ALL CODES ---
-@bot.tree.command(name="viewcodes", description="See all active codes in stock (Admin Only)")
-async def view_codes(interaction: discord.Interaction):
+# --- ADMIN: ADD CODE ---
+@bot.tree.command(name="addcode", description="Add a new GP Link code (Admin Only)")
+async def add_code(interaction: discord.Interaction, code: str, service_name: str, reward_details: str):
     if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return await interaction.response.send_message("❌ No permission.", ephemeral=True)
     
-    codes = load_codes()
-    if not codes:
-        return await interaction.response.send_message("📭 Database is empty. No codes found.", ephemeral=True)
-    
-    embed = discord.Embed(title="📦 Current Stock", color=discord.Color.orange())
-    for c in codes:
-        embed.add_field(name=f"Code: {c}", value=f"Service: {codes[c]['service']}", inline=False)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    data = load_data()
+    data[code] = {"service": service_name, "reward": reward_details}
+    save_data(data)
+    await interaction.response.send_message(f"✅ Code `{code}` registered. Ready for GP Link!", ephemeral=True)
 
-# --- USER COMMAND: REDEEM WITH LOGS ---
+# --- USER: REDEEM (STRICT ONE-TIME) ---
 @bot.tree.command(name="redeem", description="Redeem your code")
 async def redeem(interaction: discord.Interaction, code: str):
-    codes = load_codes()
+    # 1. Load data
+    data = load_data()
     
-    if code in codes:
-        data = codes[code]
-        try:
-            # 1. Send Credentials to User via DM
-            user_embed = discord.Embed(title="🎁 Account Redeemed!", color=discord.Color.green())
-            user_embed.add_field(name="Service", value=data['service'], inline=False)
-            user_embed.add_field(name="Email/ID", value=f"`{data['email']}`", inline=True)
-            user_embed.add_field(name="Password", value=f"`{data['password']}`", inline=True)
-            user_embed.set_footer(text="Thank you for using Tech4U!")
-            await interaction.user.send(embed=user_embed)
-            
-            # 2. Send Log to Admin Channel
-            if LOG_CHANNEL_ID != 0:
-                log_chan = bot.get_channel(LOG_CHANNEL_ID)
-                if log_chan:
-                    log_embed = discord.Embed(title="📜 Code Redeemed", color=discord.Color.blue())
-                    log_embed.add_field(name="User", value=f"{interaction.user.mention} ({interaction.user.id})", inline=True)
-                    log_embed.add_field(name="Service", value=data['service'], inline=True)
-                    log_embed.add_field(name="Code Used", value=f"`{code}`", inline=False)
-                    log_embed.set_timestamp()
-                    await log_chan.send(embed=log_embed)
+    # 2. Check if code exists
+    if code not in data:
+        return await interaction.response.send_message("❌ This code is invalid or has already been used!", ephemeral=True)
 
-            # 3. Remove code and confirm
-            del codes[code]
-            save_codes(codes)
-            await interaction.response.send_message("✅ Success! The details have been sent to your DMs.", ephemeral=True)
+    # 3. DELETE THE CODE IMMEDIATELY (Prevents double-use)
+    item = data.pop(code)
+    save_data(data)
 
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ Error: I cannot DM you. Please enable DMs in your privacy settings.", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ Invalid or already used code.", ephemeral=True)
+    # 4. Try to deliver the reward
+    try:
+        embed = discord.Embed(title="🎁 Reward Delivered!", color=discord.Color.green())
+        embed.add_field(name="Item", value=item['service'], inline=False)
+        embed.add_field(name="Your Reward", value=f"**{item['reward']}**", inline=False)
+        embed.set_footer(text="Thank you for using Tech4U!")
+        
+        await interaction.user.send(embed=embed)
+        
+        # 5. Send Log
+        if LOG_CHANNEL_ID != 0:
+            log_chan = bot.get_channel(LOG_CHANNEL_ID)
+            if log_chan:
+                await log_chan.send(f"✅ **{interaction.user}** redeemed code `{code}` for **{item['service']}**")
+
+        await interaction.response.send_message("✅ Success! The reward was sent to your DMs.", ephemeral=True)
+
+    except discord.Forbidden:
+        # If DMs are closed, the code is still deleted to prevent someone else from stealing it.
+        await interaction.response.send_message("⚠️ Success, but I couldn't DM you! Please open your DMs and contact Admin.", ephemeral=True)
 
 keep_alive()
 bot.run(TOKEN)
