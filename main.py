@@ -66,18 +66,18 @@ bot = MyBot()
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/help | Tech4U"))
-    print(f'✅ Tech4U Master Bot Online')
+    print(f'✅ Tech4U Pro Master Online')
 
-# --- TIMER LOGIC (WARNINGS & BAN & DELETION) ---
+# --- TIMER LOGIC ---
 async def start_vouch_timer(member, temp_channel):
     user_id = str(member.id)
     warn_chan = bot.get_channel(WARN_CHANNEL_ID)
     for i in range(1, 4):
-        await asyncio.sleep(600) # 10 mins each
+        await asyncio.sleep(600) # 10 mins
         permit = vouch_col.find_one({"_id": user_id})
         if permit:
             if i == 1: await warn_chan.send(f"⚠️ **Reminder** {member.mention}\nYou have not posted your vouch yet. Please send your vouch in <#{VOUCH_CHANNEL_ID}>.")
-            elif i == 2: await warn_chan.send(f"⚠️ **Second Warning** {member.mention}\nIt has been 20 minutes. Post in <#{VOUCH_CHANNEL_ID}> immediately.")
+            elif i == 2: await warn_chan.send(f"⚠️ **Second Warning** {member.mention}\nPost in <#{VOUCH_CHANNEL_ID}> immediately.")
             elif i == 3:
                 if member.guild_permissions.administrator:
                     await warn_chan.send(f"⚠️ {member.mention}, as Admin I won't ban you, but please vouch!")
@@ -110,7 +110,7 @@ async def on_message(message):
             return await message.channel.send(f"❌ {message.author.mention} ruined it! Reset to 1.")
         count_col.update_one({"_id": guild_id}, {"$set": {"count": val, "last_user_id": str(message.author.id)}})
         await message.add_reaction("✅")
-    # Vouch Permit Check (Easy Mode: Accept anything and lock)
+    # Vouch Permit Check
     if message.channel.id == VOUCH_CHANNEL_ID:
         uid = str(message.author.id)
         if vouch_col.find_one_and_delete({"_id": uid}):
@@ -122,7 +122,59 @@ async def on_message(message):
                 try: await message.delete()
                 except: pass
 
-# --- REDEEM COMMAND ---
+# --- ADMIN COMMANDS ---
+@bot.tree.command(name="remove_time", description="Reset a user's 24h redeem limit (Admin Only)")
+async def remove_time(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator: return
+    limit_col.delete_one({"_id": str(user.id)})
+    await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}. They can redeem again now!", ephemeral=True)
+
+@bot.tree.command(name="deletecode", description="Remove a code from stock (Admin Only)")
+async def delete_code(interaction: discord.Interaction, code: str):
+    if not interaction.user.guild_permissions.administrator: return
+    res = codes_col.delete_one({"_id": code})
+    if res.deleted_count > 0:
+        await interaction.response.send_message(f"🗑️ Code `{code}` deleted from database.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ Code `{code}` not found.", ephemeral=True)
+
+@bot.tree.command(name="viewcodes", description="Check stock (Admin Only)")
+async def viewcodes(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    all_c = codes_col.find()
+    embed = discord.Embed(title="📦 Current Stock", color=0x9b59b6)
+    count = 0
+    for c in all_c:
+        embed.add_field(name=f"Code: {c['_id']}", value=f"Service: {c['service']}\nID: `{c['email']}`\nPass: `{c['password']}`", inline=False)
+        count += 1
+    if count == 0: return await interaction.response.send_message("Empty.", ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="addcode")
+async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
+    if not interaction.user.guild_permissions.administrator: return
+    codes_col.update_one({"_id": code}, {"$set": {"service": service, "email": email, "password": password}}, upsert=True)
+    await interaction.response.send_message(f"✅ Code `{code}` added.", ephemeral=True)
+
+@bot.tree.command(name="nub", description="Set Counting Channel")
+async def nub(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    count_col.update_one({"_id": str(interaction.guild.id)}, {"$set": {"channel_id": interaction.channel.id, "count": 0}}, upsert=True)
+    await interaction.response.send_message(f"✅ Counting channel set.")
+
+@bot.tree.command(name="announce")
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
+    if not interaction.user.guild_permissions.administrator: return
+    await channel.send(embed=discord.Embed(title=title, description=message.replace("\\n", "\n"), color=0xf1c40f))
+    await interaction.response.send_message("✅ Sent.", ephemeral=True)
+
+@bot.tree.command(name="clear")
+async def clear(interaction: discord.Interaction, amount: int):
+    if not interaction.user.guild_permissions.administrator: return
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"🧹 Deleted {amount}", ephemeral=True)
+
+# --- USER COMMANDS ---
 @bot.tree.command(name="redeem")
 async def redeem(interaction: discord.Interaction, code: str):
     uid = str(interaction.user.id)
@@ -154,11 +206,11 @@ async def redeem(interaction: discord.Interaction, code: str):
     await interaction.followup.send(f"✅ Success! Go to {temp.mention}")
 
     if is_yt:
-        await temp.send(f"{member.mention} Type your **Gmail** address:")
+        await temp.send(f"{member.mention} Type your **Gmail**:")
         try:
             msg = await bot.wait_for('message', check=lambda m: m.author == member and m.channel == temp, timeout=300.0)
             await bot.get_channel(GMAIL_LOG_CHANNEL_ID).send(f"📬 **YT Request**: {member.mention} | Gmail: `{msg.content}`")
-            await temp.send("✅ Gmail sent! Admin will process soon.")
+            await temp.send("✅ Sent to admin!")
         except: pass
     else:
         e = discord.Embed(title="🎁 Account Details", color=0x2ecc71)
@@ -168,7 +220,6 @@ async def redeem(interaction: discord.Interaction, code: str):
         e.description = "⏰ **This channel will be deleted in 30 minutes. Copy your IDP somewhere safe!**"
         await temp.send(embed=e)
     
-    # Updated message format below
     v_msg = f"{code} I got {item['service']}, thanks @admin"
     await temp.send(f"📢 **VOUCH REQUIRED IN <#{VOUCH_CHANNEL_ID}>**:\n\n`{v_msg}`\n\n*Failure = 3 Day Ban!*")
     
@@ -176,46 +227,10 @@ async def redeem(interaction: discord.Interaction, code: str):
     await bot.get_channel(VOUCH_CHANNEL_ID).set_permissions(member, send_messages=True)
     asyncio.create_task(start_vouch_timer(member, temp))
 
-# --- ADMIN COMMANDS ---
-@bot.tree.command(name="nub")
-async def nub(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator: return
-    count_col.update_one({"_id": str(interaction.guild.id)}, {"$set": {"channel_id": interaction.channel.id, "count": 0}}, upsert=True)
-    await interaction.response.send_message(f"✅ Counting channel set.")
-
-@bot.tree.command(name="announce")
-async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
-    if not interaction.user.guild_permissions.administrator: return
-    await channel.send(embed=discord.Embed(title=title, description=message.replace("\\n", "\n"), color=0xf1c40f))
-    await interaction.response.send_message("✅ Sent.", ephemeral=True)
-
-@bot.tree.command(name="addcode")
-async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
-    if not interaction.user.guild_permissions.administrator: return
-    codes_col.update_one({"_id": code}, {"$set": {"service": service, "email": email, "password": password}}, upsert=True)
-    await interaction.response.send_message(f"✅ Code `{code}` added.", ephemeral=True)
-
-@bot.tree.command(name="viewcodes")
-async def viewcodes(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator: return
-    all_c = codes_col.find()
-    embed = discord.Embed(title="📦 Stock", color=0x9b59b6)
-    count = 0
-    for c in all_c:
-        embed.add_field(name=f"Code: {c['_id']}", value=f"Service: {c['service']}\nID: `{c['email']}`\nPass: `{c['password']}`", inline=False)
-        count += 1
-    await interaction.response.send_message(embed=embed if count > 0 else discord.Embed(description="Empty"), ephemeral=True)
-
-@bot.tree.command(name="clear")
-async def clear(interaction: discord.Interaction, amount: int):
-    if not interaction.user.guild_permissions.administrator: return
-    await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🧹 Deleted {amount}", ephemeral=True)
-
 @bot.tree.command(name="help")
 async def help_cmd(interaction: discord.Interaction):
-    e = discord.Embed(title="🛡️ Tech4U Help Center", color=0x3498db)
-    e.description = f"1️⃣ Get code\n2️⃣ `/redeem` here\n3️⃣ Open private channel\n4️⃣ Vouch exactly in <#{VOUCH_CHANNEL_ID}>"
+    e = discord.Embed(title="🛡️ Tech4U Help", color=0x3498db)
+    e.description = f"1️⃣ Get code\n2️⃣ `/redeem` here\n3️⃣ Open private channel\n4️⃣ Vouch in #vouches"
     await interaction.response.send_message(embed=e)
 
 keep_alive()
