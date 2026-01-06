@@ -29,7 +29,7 @@ cluster = MongoClient(MONGO_URI, tlsCAFile=ca, tlsAllowInvalidCertificates=True)
 db = cluster["tech4u_database"]
 codes_col, vouch_col, count_col, warns_col, bans_col = db["codes"], db["vouch_permits"], db["counting_data"], db["warnings"], db["temp_bans"]
 
-# --- 3. CONFIGURATION (UPDATED IDs) ---
+# --- 3. CONFIGURATION (STRICT IDs) ---
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = "https://discord.com/api/webhooks/1457635950942490645/fD3vFDv7IExZcZqEp6rLNd0cy1RM_Ccjv53o4Ne64HUhV5WRAmyKWpc7ph9J7lIMthD8"
 REDEEM_LOG_ID = 1457623750475387136
@@ -82,15 +82,15 @@ async def start_vouch_timer(member, temp_channel):
                 if member.guild_permissions.administrator:
                     await warn_chan.send(f"⚠️ {member.mention} Admin bypass for ban.")
                 else:
-                    await warn_chan.send(f"🚨 **Final Warning** {member.mention}\nYou are now **BANNED for 3 days** for ignoring the vouch requirement.")
+                    await warn_chan.send(f"🚨 **Final Warning** {member.mention}\nYou are now **BANNED for 3 days**.")
                     unban_time = datetime.utcnow() + timedelta(days=3)
                     bans_col.update_one({"_id": member.id}, {"$set": {"unban_at": unban_time, "guild_id": member.guild.id}}, upsert=True)
-                    try: await member.ban(reason="No vouch within 30m")
+                    try: await member.ban(reason="No vouch (30m)")
                     except: pass
     try: await temp_channel.delete()
     except: pass
 
-# --- ON MESSAGE LOGIC ---
+# --- AUTO RULES (OwO, Counting, Vouch) ---
 @bot.event
 async def on_message(message):
     if message.author.bot: return
@@ -118,22 +118,71 @@ async def on_message(message):
         uid = str(message.author.id)
         user_v = vouch_col.find_one({"_id": uid})
         if user_v and user_v.get("permits", 0) > 0:
-            # Check for EXACT match of the expected message
-            expected = user_v.get("expected_msg")
-            if message.content.strip().lower() == expected.lower():
-                vouch_col.update_one({"_id": uid}, {"$inc": {"permits": -1}, "$set": {"expected_msg": ""}})
+            # Case-insensitive check: must contain "i got" and "thanks"
+            content = message.content.lower()
+            if "i got" in content and ("thanks" in content or "ty" in content):
+                vouch_col.update_one({"_id": uid}, {"$inc": {"permits": -1}})
                 await message.add_reaction("✅")
                 await message.channel.send(f"✅ **Vouch Verified!** Thanks {message.author.mention}!", delete_after=10)
                 if vouch_col.find_one({"_id": uid}).get("permits", 0) == 0:
                     await message.channel.set_permissions(message.author, send_messages=False)
             else:
                 await message.delete()
-                await message.channel.send(f"❌ {message.author.mention}, use the **EXACT** vouch format given in your private channel!", delete_after=10)
+                await message.channel.send(f"❌ {message.author.mention}, use the EXACT format: `[CODE] I got [SERVICE], thanks @admin`", delete_after=10)
         else:
             try: await message.delete()
             except: pass
 
-# --- COMMANDS ---
+# --- ADMIN COMMANDS ---
+@bot.tree.command(name="announce", description="Professional Announcement")
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
+    if not interaction.user.guild_permissions.administrator: return
+    embed = discord.Embed(title=title, description=message.replace("\\n", "\n"), color=discord.Color.gold())
+    await channel.send(embed=embed)
+    await interaction.response.send_message("✅ Sent!", ephemeral=True)
+
+@bot.tree.command(name="nub", description="Set Counting Channel")
+async def nub(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    count_col.update_one({"_id": str(interaction.guild.id)}, {"$set": {"channel_id": interaction.channel.id, "count": 0}}, upsert=True)
+    await interaction.response.send_message(f"✅ Counting channel set to {interaction.channel.mention}")
+
+@bot.tree.command(name="addcode")
+async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
+    if not interaction.user.guild_permissions.administrator: return
+    codes_col.update_one({"_id": code}, {"$set": {"service": service, "email": email, "password": password}}, upsert=True)
+    await interaction.response.send_message(f"✅ Code `{code}` added.", ephemeral=True)
+
+@bot.tree.command(name="viewcodes")
+async def viewcodes(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    all_c = codes_col.find()
+    embed = discord.Embed(title="📦 Stock", color=0x9b59b6)
+    count = 0
+    for c in all_c:
+        embed.add_field(name=f"Code: {c['_id']}", value=f"Service: {c['service']}\nID: `{c['email']}`\nPass: `{c['password']}`", inline=False)
+        count += 1
+    await interaction.response.send_message(embed=embed if count > 0 else discord.Embed(description="Empty"), ephemeral=True)
+
+@bot.tree.command(name="lock")
+async def lock(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    await interaction.response.send_message("🔒 Locked.")
+
+@bot.tree.command(name="unlock")
+async def unlock(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: return
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
+    await interaction.response.send_message("🔓 Unlocked.")
+
+@bot.tree.command(name="clear")
+async def clear(interaction: discord.Interaction, amount: int):
+    if not interaction.user.guild_permissions.administrator: return
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"🧹 Deleted {amount}", ephemeral=True)
+
+# --- USER COMMANDS ---
 @bot.tree.command(name="redeem")
 async def redeem(interaction: discord.Interaction, code: str):
     item = codes_col.find_one_and_delete({"_id": code})
@@ -143,9 +192,9 @@ async def redeem(interaction: discord.Interaction, code: str):
     guild, member = interaction.guild, interaction.user
     is_yt = "youtube" in item['service'].lower()
     
-    # Send Log to 1457623750475387136
-    redeem_log = bot.get_channel(REDEEM_LOG_ID)
-    if redeem_log: await redeem_log.send(f"The **[{code}]** have been use by {member.mention}")
+    # Send Redeem Log
+    log_chan = bot.get_channel(REDEEM_LOG_ID)
+    if log_chan: await log_chan.send(f"The **[{code}]** have been use by {member.mention}")
 
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
                   member: discord.PermissionOverwrite(view_channel=True, send_messages=is_yt, read_message_history=True),
@@ -158,26 +207,19 @@ async def redeem(interaction: discord.Interaction, code: str):
         try:
             msg = await bot.wait_for('message', check=lambda m: m.author == member and m.channel == temp, timeout=300.0)
             await bot.get_channel(GMAIL_LOG_CHANNEL_ID).send(f"📬 **YT Request**: {member.mention} | Gmail: `{msg.content}`")
-            await temp.send("✅ Gmail sent to admin!")
+            await temp.send("✅ Sent to admin!")
         except: pass
     else:
         e = discord.Embed(title="🎁 Account Details", color=0x2ecc71)
         e.add_field(name="Service", value=item['service']).add_field(name="ID", value=f"`{item['email']}`").add_field(name="Pass", value=f"`{item['password']}`")
         await temp.send(embed=e)
     
-    # STRICT VOUCH FORMAT
-    expected_str = f"{code} I got {item['service']}, thanks @admin"
-    await temp.send(f"📢 **VOUCH REQUIRED IN <#{VOUCH_CHANNEL_ID}>**:\n`{expected_str}`\n*Failure = 3 Day Ban!*")
+    v_fmt = f"`{code} I got {item['service']}, thanks @admin`"
+    await temp.send(f"📢 **VOUCH REQUIRED IN <#{VOUCH_CHANNEL_ID}>**:\n{v_fmt}\n*Failure = 3 Day Ban!*")
     
-    vouch_col.update_one({"_id": str(member.id)}, {"$inc": {"permits": 1}, "$set": {"expected_msg": expected_str}}, upsert=True)
+    vouch_col.update_one({"_id": str(member.id)}, {"$inc": {"permits": 1}}, upsert=True)
     await bot.get_channel(VOUCH_CHANNEL_ID).set_permissions(member, send_messages=True)
     asyncio.create_task(start_vouch_timer(member, temp))
-
-@bot.tree.command(name="addcode")
-async def add_code(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
-    if not interaction.user.guild_permissions.administrator: return
-    codes_col.update_one({"_id": code}, {"$set": {"service": service, "email": email, "password": password}}, upsert=True)
-    await interaction.response.send_message(f"✅ Code `{code}` registered.", ephemeral=True)
 
 @bot.tree.command(name="help")
 async def help_cmd(interaction: discord.Interaction):
