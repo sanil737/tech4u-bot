@@ -14,7 +14,7 @@ from threading import Thread
 # --- 1. KEEP ALIVE SERVER ---
 app = Flask('')
 @app.route('/')
-def home(): return "Tech4U Master Bot 24/7"
+def home(): return "Tech4U Master Bot Online 24/7!"
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
@@ -68,24 +68,24 @@ async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/help | Tech4U"))
     print(f'✅ Tech4U Pro Online')
 
-# --- TIMER LOGIC ---
+# --- TIMER LOGIC (WARNINGS & BAN) ---
 async def start_vouch_timer(member, temp_channel):
     user_id = str(member.id)
     warn_chan = bot.get_channel(WARN_CHANNEL_ID)
     for i in range(1, 4):
-        await asyncio.sleep(600)
-        user_data = vouch_col.find_one({"user_id": user_id})
-        if user_data:
-            if i == 1: await warn_chan.send(f"⚠️ **Reminder** {member.mention} Vouch in <#{VOUCH_CHANNEL_ID}>.")
-            elif i == 2: await warn_chan.send(f"⚠️ **Second Warning** {member.mention} Vouch in <#{VOUCH_CHANNEL_ID}> now!")
+        await asyncio.sleep(600) # 10 min intervals
+        permit = vouch_col.find_one({"_id": user_id})
+        if permit:
+            if i == 1: await warn_chan.send(f"⚠️ **Reminder** {member.mention}\nYou have not posted your vouch yet. Please send your vouch in <#{VOUCH_CHANNEL_ID}>.")
+            elif i == 2: await warn_chan.send(f"⚠️ **Second Warning** {member.mention}\nIt has been 20 minutes. Post in <#{VOUCH_CHANNEL_ID}> immediately.")
             elif i == 3:
                 if member.guild_permissions.administrator:
-                    await warn_chan.send(f"⚠️ {member.mention} Admin bypass ban.")
+                    await warn_chan.send(f"⚠️ {member.mention}, as Admin I won't ban you, but please vouch!")
                 else:
-                    await warn_chan.send(f"🚨 **Final Warning** {member.mention} BANNED for 3 days.")
+                    await warn_chan.send(f"🚨 **Final Warning** {member.mention}\nYou are now **BANNED for 3 days** for ignoring the vouch requirement.")
                     unban_time = datetime.utcnow() + timedelta(days=3)
                     bans_col.update_one({"_id": member.id}, {"$set": {"unban_at": unban_time, "guild_id": member.guild.id}}, upsert=True)
-                    try: await member.ban(reason="No vouch (30m)")
+                    try: await member.ban(reason="No vouch within 30m")
                     except: pass
     try: await temp_channel.delete()
     except: pass
@@ -94,14 +94,12 @@ async def start_vouch_timer(member, temp_channel):
 @bot.event
 async def on_message(message):
     if message.author.bot: return
-
-    # 1. OwO RULE
+    # OwO Rule
     if any(message.content.lower().startswith(c) for c in ["owo","hunt","battle","pray","sell","buy"]):
         if message.channel.id != OWO_CHANNEL_ID and not message.author.guild_permissions.administrator:
             await message.delete()
             return await message.channel.send(f"🚨 {message.author.mention} Use OwO in <#{OWO_CHANNEL_ID}>!", delete_after=5)
-
-    # 2. COUNTING
+    # Counting Rule
     guild_id = str(message.guild.id)
     c_data = count_col.find_one({"_id": guild_id})
     if c_data and message.channel.id == c_data.get("channel_id") and message.content.isdigit():
@@ -109,32 +107,16 @@ async def on_message(message):
         if str(message.author.id) == last or val != cur + 1:
             count_col.update_one({"_id": guild_id}, {"$set": {"count": 0, "last_user_id": None}})
             await message.add_reaction("❌")
-            return await message.channel.send(f"❌ {message.author.mention} Reset to 1.")
+            return await message.channel.send(f"❌ {message.author.mention} ruined it! Resetting to 1.")
         count_col.update_one({"_id": guild_id}, {"$set": {"count": val, "last_user_id": str(message.author.id)}})
         await message.add_reaction("✅")
-
-    # 3. SMART VOUCH MONITOR
+    # Vouch Permit Check
     if message.channel.id == VOUCH_CHANNEL_ID:
         uid = str(message.author.id)
-        # Find if user has a pending vouch
-        pending_vouch = vouch_col.find_one({"user_id": uid})
-        
-        if pending_vouch:
-            code_needed = str(pending_vouch["code"]).lower()
-            content = message.content.lower()
-            
-            # Logic: Must mention someone OR have "@admin" text AND contain the code
-            has_mention = len(message.mentions) > 0 or "@admin" in content
-            has_code = code_needed in content
-
-            if has_mention and has_code and "i got" in content:
-                vouch_col.delete_one({"_id": pending_vouch["_id"]})
-                await message.add_reaction("✅")
-                await message.channel.send(f"✅ **Vouch Verified!** Thanks {message.author.mention}!", delete_after=10)
-                await message.channel.set_permissions(message.author, send_messages=False)
-            else:
-                await message.delete()
-                await message.channel.send(f"❌ {message.author.mention}, you must mention **@admin**, include your code **{code_needed.upper()}**, and say what you got!", delete_after=10)
+        if vouch_col.find_one_and_delete({"_id": uid}):
+            await message.add_reaction("✅")
+            await message.channel.send(f"✅ **Vouch Verified!** Thanks {message.author.mention}!", delete_after=10)
+            await message.channel.set_permissions(message.author, send_messages=False)
         else:
             if not message.author.guild_permissions.administrator:
                 try: await message.delete()
@@ -144,9 +126,9 @@ async def on_message(message):
 @bot.tree.command(name="redeem")
 async def redeem(interaction: discord.Interaction, code: str):
     uid = str(interaction.user.id)
-    # Daily Limit Check
-    user_limit = limit_col.find_one({"_id": uid})
-    if user_limit and (datetime.utcnow() - user_limit["last_redeem"]) < timedelta(days=1):
+    # 24h limit
+    u_limit = limit_col.find_one({"_id": uid})
+    if u_limit and (datetime.utcnow() - u_limit["last_redeem"]) < timedelta(days=1):
         return await interaction.response.send_message("❌ One code per day only!", ephemeral=True)
 
     item = codes_col.find_one_and_delete({"_id": code})
@@ -159,7 +141,7 @@ async def redeem(interaction: discord.Interaction, code: str):
     is_yt = "youtube" in item['service'].lower()
     
     log_chan = bot.get_channel(REDEEM_LOG_ID)
-    if log_chan: await log_chan.send(f"The **[{code}]** have been use by {member.mention}")
+    if log_chan: await log_chan.send(f"The **[{code}]** have been used by {member.mention}")
 
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
                   member: discord.PermissionOverwrite(view_channel=True, send_messages=is_yt, read_message_history=True),
@@ -168,23 +150,24 @@ async def redeem(interaction: discord.Interaction, code: str):
     await interaction.followup.send(f"✅ Success! Go to {temp.mention}")
 
     if is_yt:
-        await temp.send(f"{member.mention} Type your **Gmail**:")
+        await temp.send(f"{member.mention} Type your **Gmail** address:")
         try:
             msg = await bot.wait_for('message', check=lambda m: m.author == member and m.channel == temp, timeout=300.0)
             await bot.get_channel(GMAIL_LOG_CHANNEL_ID).send(f"📬 **YT Request**: {member.mention} | Gmail: `{msg.content}`")
-            await temp.send("✅ Sent to admin!")
+            await temp.send("✅ Gmail sent! Admin will process soon.")
         except: pass
     else:
         e = discord.Embed(title="🎁 Account Details", color=0x2ecc71)
-        e.add_field(name="Service", value=item['service']).add_field(name="ID", value=f"`{item['email']}`").add_field(name="Pass", value=f"`{item['password']}`")
-        e.description = "⏰ **Channel deletes in 30 mins.**"
+        e.add_field(name="Service", value=item['service'], inline=False)
+        e.add_field(name="ID", value=f"`{item['email']}`", inline=True)
+        e.add_field(name="Pass", value=f"`{item['password']}`", inline=True)
+        # ADDED THE 30 MINUTE WARNING MESSAGE HERE
+        e.description = "⏰ **This channel will be deleted in 30 minutes. Please copy your account details (IDP) and save them somewhere else!**"
         await temp.send(embed=e)
     
-    v_msg = f"{code} I got {item['service']}, thanks @admin"
-    await temp.send(f"📢 **VOUCH REQUIRED IN <#{VOUCH_CHANNEL_ID}>**:\n`{v_msg}`\n*Failure = 3 Day Ban!*")
+    await temp.send(f"📢 **VOUCH REQUIRED:** Please send a vouch in <#{VOUCH_CHANNEL_ID}> now!\n*Failure to vouch in 30 mins = 3 Day Ban!*")
     
-    # Save permit with code
-    vouch_col.insert_one({"user_id": uid, "permits": 1, "code": code})
+    vouch_col.update_one({"_id": uid}, {"$set": {"permits": 1}}, upsert=True)
     await bot.get_channel(VOUCH_CHANNEL_ID).set_permissions(member, send_messages=True)
     asyncio.create_task(start_vouch_timer(member, temp))
 
@@ -200,16 +183,16 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
     await channel.send(embed=discord.Embed(title=title, description=message.replace("\\n", "\n"), color=0xf1c40f))
     await interaction.response.send_message("✅ Sent.", ephemeral=True)
 
-@bot.tree.command(name="nub")
-async def nub(interaction: discord.Interaction):
+@bot.tree.command(name="clear")
+async def clear(interaction: discord.Interaction, amount: int):
     if not interaction.user.guild_permissions.administrator: return
-    count_col.update_one({"_id": str(interaction.guild.id)}, {"$set": {"channel_id": interaction.channel.id, "count": 0}}, upsert=True)
-    await interaction.response.send_message(f"✅ Counting channel set.")
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"🧹 Deleted {amount}", ephemeral=True)
 
 @bot.tree.command(name="help")
 async def help_cmd(interaction: discord.Interaction):
     e = discord.Embed(title="🛡️ Tech4U Help Center", color=0x3498db)
-    e.description = f"1️⃣ Get code\n2️⃣ `/redeem` here\n3️⃣ Open private channel\n4️⃣ Vouch in <#{VOUCH_CHANNEL_ID}>"
+    e.description = f"1️⃣ Get code\n2️⃣ `/redeem` here\n3️⃣ Open private channel\n4️⃣ Vouch in #vouches"
     await interaction.response.send_message(embed=e)
 
 keep_alive()
