@@ -1,6 +1,5 @@
 discord.py
 flask
-pymongo
-dnspython
-aiohttp
+pymongo[srv]
 certifi
+aiohttp
