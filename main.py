@@ -3,7 +3,7 @@ import os
 from discord import app_commands
 from discord.ext import commands, tasks
 import pymongo
-from bson import ObjectId # ✅ Correct Import for Mongo IDs
+from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 import asyncio
 import re
@@ -18,6 +18,7 @@ TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 DB_NAME = "enjoined_gaming_db"
+# ⚠️ IMPORTANT: MAKE SURE YOUR ID IS HERE
 ADMIN_IDS = [986251574982606888, 1458812527055212585]
 
 # 📌 CHANNELS
@@ -44,6 +45,7 @@ mongo_client = pymongo.MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 
 col_users = db["users"]
+col_codes = db["codes"]
 col_items = db["shop_items"]
 col_vouch = db["vouch_pending"]
 col_channels = db["active_channels"]
@@ -234,27 +236,27 @@ def get_user_data(user_id):
     return data
 
 # =========================================
-# 🛍️ SHOP
+# 🛍️ SHOP SYSTEM
 # =========================================
 
-@bot.tree.command(name="additem", description="Admin: Add item")
+@bot.tree.command(name="additem", description="Admin: Add item to shop")
 async def additem(interaction: discord.Interaction, service: str, account_details: str, price: int):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     col_items.insert_one({"service": service, "details": account_details, "price": price, "added_at": datetime.now(timezone.utc)})
     await interaction.response.send_message(f"✅ Added **{service}** ({price} coins).", ephemeral=True)
 
-@bot.tree.command(name="shop", description="View shop")
+@bot.tree.command(name="shop", description="View available items")
 async def shop(interaction: discord.Interaction):
     await interaction.response.defer()
     pipeline = [{"$group": {"_id": "$service", "count": {"$sum": 1}, "price": {"$first": "$price"}}}]
     items = list(col_items.aggregate(pipeline))
-    embed = discord.Embed(title="🛒 Shop", description="Use `/buy [item]`", color=discord.Color.green())
+    embed = discord.Embed(title="🛒 EG Coin Shop", description="Use `/buy [service]` to purchase.", color=discord.Color.green())
     if not items: embed.description = "🚫 Out of Stock"
     else:
         for item in items: embed.add_field(name=f"📦 {item['_id']}", value=f"💰 {item['price']} Coins\n📊 Stock: {item['count']}", inline=False)
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="buy", description="Buy item")
+@bot.tree.command(name="buy", description="Buy an item with coins")
 async def buy(interaction: discord.Interaction, service: str):
     await interaction.response.defer(ephemeral=True)
     config = col_settings.find_one({"_id": "config"})
@@ -285,12 +287,12 @@ async def buy(interaction: discord.Interaction, service: str):
 
     col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": item["price"], "service": item["service"], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
 
-    embed = discord.Embed(title="🎉 Purchased", color=discord.Color.green())
+    embed = discord.Embed(title="🎉 Purchase Successful", color=discord.Color.green())
     embed.add_field(name="Details", value=f"```\n{item['details']}\n```")
     embed.set_footer(text="VOUCH IN 30 MINS OR BAN")
     await chan.send(f"{interaction.user.mention}", embed=embed)
-    await chan.send(f"**VOUCH:** `[{item['price']}] I got {item['service']}, thanks @admin`")
-    await interaction.followup.send(f"✅ Purchased! {chan.mention}")
+    await chan.send(f"**VOUCH FORMAT:** `[{item['price']}] I got {item['service']}, thanks @admin`")
+    await interaction.followup.send(f"✅ Purchased! Check {chan.mention}")
 
 # =========================================
 # 🤝 INVITES
@@ -298,11 +300,13 @@ async def buy(interaction: discord.Interaction, service: str):
 
 @bot.event
 async def on_invite_create(invite):
-    if invite.guild.id in bot.invite_cache: bot.invite_cache[invite.guild.id][invite.code] = invite.uses
+    if invite.guild.id in bot.invite_cache:
+        bot.invite_cache[invite.guild.id][invite.code] = invite.uses
 
 @bot.event
 async def on_invite_delete(invite):
-    if invite.guild.id in bot.invite_cache and invite.code in bot.invite_cache[invite.guild.id]: del bot.invite_cache[invite.guild.id][invite.code]
+    if invite.guild.id in bot.invite_cache and invite.code in bot.invite_cache[invite.guild.id]:
+        del bot.invite_cache[invite.guild.id][invite.code]
 
 @bot.event
 async def on_member_join(member):
@@ -314,6 +318,7 @@ async def on_member_join(member):
     guild_id = member.guild.id
     if guild_id not in bot.invite_cache: return
     old_invites = bot.invite_cache[guild_id]
+    
     try: new_invites_obj = await member.guild.invites()
     except: return
 
@@ -344,7 +349,7 @@ async def on_member_remove(member):
         col_channels.delete_one({"_id": ch_data["_id"]})
 
 # =========================================
-# 🔐 PRIVATE CHANNEL (SAFE VERSION)
+# 🔐 PRIVATE CHANNEL
 # =========================================
 
 class RequestView(discord.ui.View):
@@ -596,10 +601,19 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(name="🎁", value="`/redeem`\n`/makeprivatechannel`", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="addcode", description="Admin: Add code (Legacy)")
+@bot.tree.command(name="addcoins", description="Admin: Add coins to user")
+async def addcoins(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    get_user_data(user.id)
+    col_users.update_one({"_id": user.id}, {"$inc": {"coins": amount}})
+    await interaction.response.send_message(f"✅ Added {amount} to {user.mention}", ephemeral=True)
+
+@bot.tree.command(name="addcode", description="Admin: Add code for /redeem")
 async def addcode(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
-    if not is_admin(interaction.user.id): return
-    if col_codes.find_one({"code": code}): return await interaction.response.send_message("❌ Code exists.", ephemeral=True)
+    if not is_admin(interaction.user.id): 
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    if col_codes.find_one({"code": code}): 
+        return await interaction.response.send_message("❌ Code exists.", ephemeral=True)
     col_codes.insert_one({"code": code, "service": service, "email": email, "password": password})
     await interaction.response.send_message(f"✅ Added `{code}`", ephemeral=True)
 
