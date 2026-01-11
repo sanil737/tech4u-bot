@@ -1,5 +1,3 @@
 discord.py
-flask
-pymongo[srv]
-certifi
-aiohttp
+pymongo
+dnspython
