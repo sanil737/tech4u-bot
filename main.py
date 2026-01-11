@@ -44,8 +44,8 @@ mongo_client = pymongo.MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 
 col_users = db["users"]
-col_items = db["shop_items"]
 col_codes = db["codes"]
+col_items = db["shop_items"]
 col_vouch = db["vouch_pending"]
 col_channels = db["active_channels"]
 col_settings = db["settings"]
@@ -200,6 +200,7 @@ class EGBot(commands.Bot):
 
     @tasks.loop(seconds=60)
     async def check_channel_expiry(self):
+        # 1. Check Rented Private Channels
         active = col_channels.find({})
         now = datetime.now(timezone.utc)
         for c in active:
@@ -211,6 +212,10 @@ class EGBot(commands.Bot):
                 except: pass
                 col_users.update_one({"_id": c["owner_id"]}, {"$set": {"current_private_channel_id": None}})
                 col_channels.delete_one({"_id": c["_id"]})
+        
+        # 2. Check Redeem/Buy Channels (Force delete after 30m if still exists)
+        # Note: check_vouch_timers handles the logic, but this is a fail-safe
+        pass # Vouch timer handles this logic explicitly
 
 bot = EGBot()
 
@@ -279,7 +284,12 @@ async def buy(interaction: discord.Interaction, service: str):
     chan = await guild.create_text_channel(f"buy-{interaction.user.name[:10]}", overwrites=overwrites)
     if bot.get_channel(CH_CODE_USE_LOG): await bot.get_channel(CH_CODE_USE_LOG).send(f"🛒 {interaction.user.mention} bought **{item['service']}**.")
 
-    col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": item["price"], "service": item["service"], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
+    # INSERT VOUCH PENDING
+    col_vouch.insert_one({
+        "channel_id": chan.id, "guild_id": guild.id, "user_id": uid, 
+        "code_used": item["price"], "service": item["service"], 
+        "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False
+    })
 
     embed = discord.Embed(title="🎁 Account Details", description="⏰ **Channel deletes in 30 mins.**", color=discord.Color.green())
     embed.add_field(name="Service", value=item['service'], inline=False)
@@ -497,6 +507,7 @@ async def redeem(interaction: discord.Interaction, code: str):
 
     col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": code, "service": cd['service'], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
     
+    # 🎨 EXACT EMBED MATCH
     embed = discord.Embed(title="🎁 Account Details", description="⏰ **Channel deletes in 30 mins.**", color=discord.Color.green())
     embed.add_field(name="Service", value=cd['service'], inline=False)
     embed.add_field(name="ID", value=f"```\n{cd['email']}\n```", inline=False)
@@ -542,12 +553,8 @@ async def addcoins(interaction: discord.Interaction, user: discord.Member, amoun
 @bot.tree.command(name="warn", description="Admin: Warn a user")
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    
-    # 1. DM User
-    try: await user.send(f"⚠️ **You have been warned in {interaction.guild.name}**\nReason: {reason}")
+    try: await user.send(f"⚠️ **Warned in {interaction.guild.name}**\nReason: {reason}")
     except: pass
-
-    # 2. Log to Warnings Channel
     warn_channel = bot.get_channel(CH_WARNINGS)
     if warn_channel:
         embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.orange())
@@ -555,7 +562,6 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
         embed.add_field(name="Admin", value=interaction.user.mention, inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         await warn_channel.send(embed=embed)
-
     await interaction.response.send_message(f"✅ Warned {user.mention}.", ephemeral=True)
 
 @bot.tree.command(name="addcode", description="Admin: Add code")
@@ -686,6 +692,7 @@ async def on_message(message):
             await message.add_reaction("✅")
             col_vouch.delete_one({"_id": pending["_id"]})
             if bot.get_channel(CH_VOUCH_LOG): await bot.get_channel(CH_VOUCH_LOG).send(f"✅ {message.author.name} vouched for `{pending['service']}`")
+            # Force close after vouch
             await asyncio.sleep(5)
             await message.channel.delete()
         else:
