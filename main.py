@@ -3,7 +3,7 @@ import os
 from discord import app_commands
 from discord.ext import commands, tasks
 import pymongo
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import re
 import traceback
@@ -108,9 +108,11 @@ class EGBot(commands.Bot):
             error_msg = f"⏳ Cooldown: {error.retry_after:.2f}s"
         elif isinstance(error, app_commands.MissingPermissions):
             error_msg = "❌ You don't have permission."
+        elif isinstance(error, KeyError):
+            error_msg = "❌ Database Error: User data missing (Fixed, try again)."
         
         print(f"⚠️ Error: {error_msg}")
-        # traceback.print_exc() # Uncomment for debugging
+        # traceback.print_exc()
         
         if not interaction.response.is_done():
             await interaction.response.send_message(f"⚠️ Error: {error_msg}", ephemeral=True)
@@ -121,15 +123,16 @@ class EGBot(commands.Bot):
     @tasks.loop(minutes=1)
     async def check_giveaways(self):
         active = col_giveaways.find({})
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for gw in active:
-            if now >= gw["end_time"]:
+            # Ensure timezone aware comparison
+            end_time = gw["end_time"].replace(tzinfo=timezone.utc) if gw["end_time"].tzinfo is None else gw["end_time"]
+            
+            if now >= end_time:
                 channel = self.get_channel(gw["channel_id"])
                 if channel:
                     try:
                         msg = await channel.fetch_message(gw["message_id"])
-                        
-                        # 🔥 FIX: Only allow users CURRENTLY in server
                         guild = channel.guild
                         valid_users = [u for u in gw["entries"] if guild.get_member(u)]
                         
@@ -138,7 +141,6 @@ class EGBot(commands.Bot):
                         else:
                             winner_id = random.choice(valid_users)
                             await msg.reply(f"🎉 **CONGRATULATIONS!**\nWinner: <@{winner_id}>\nPrize: **{gw['prize']}**")
-                            
                             embed = msg.embeds[0]
                             embed.color = discord.Color.red()
                             embed.set_footer(text="Ended")
@@ -149,18 +151,22 @@ class EGBot(commands.Bot):
     @tasks.loop(minutes=10)
     async def check_invite_validation(self):
         pending = col_invites.find({"valid": False})
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for inv in pending:
-            if now > (inv["joined_at"] + timedelta(hours=24)):
+            join_time = inv["joined_at"].replace(tzinfo=timezone.utc) if inv["joined_at"].tzinfo is None else inv["joined_at"]
+            
+            if now > (join_time + timedelta(hours=24)):
                 col_invites.update_one({"_id": inv["_id"]}, {"$set": {"valid": True}})
                 col_users.update_one({"_id": inv["inviter_id"]}, {"$inc": {"coins": 100, "invite_count": 1}})
 
     @tasks.loop(minutes=1)
     async def check_request_timeouts(self):
         reqs = col_requests.find({})
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for r in reqs:
-            if now > r["expires_at"]:
+            expire_time = r["expires_at"].replace(tzinfo=timezone.utc) if r["expires_at"].tzinfo is None else r["expires_at"]
+            
+            if now > expire_time:
                 col_users.update_one({"_id": r["host_id"]}, {"$inc": {"coins": r["price"]}})
                 col_requests.delete_one({"_id": r["_id"]})
                 try:
@@ -173,10 +179,13 @@ class EGBot(commands.Bot):
     @tasks.loop(seconds=30)
     async def check_vouch_timers(self):
         pending = col_vouch.find({})
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for p in pending:
             start_time = p["start_time"]
             if isinstance(start_time, str): start_time = datetime.fromisoformat(start_time)
+            # Make sure start_time is timezone aware
+            if start_time.tzinfo is None: start_time = start_time.replace(tzinfo=timezone.utc)
+            
             elapsed = (now - start_time).total_seconds() / 60
             
             try: channel = self.get_channel(p["channel_id"])
@@ -208,9 +217,11 @@ class EGBot(commands.Bot):
     @tasks.loop(seconds=60)
     async def check_channel_expiry(self):
         active = col_channels.find({})
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for c in active:
-            if now > c["end_time"]:
+            end_time = c["end_time"].replace(tzinfo=timezone.utc) if c["end_time"].tzinfo is None else c["end_time"]
+            
+            if now > end_time:
                 try:
                     channel = self.get_channel(c["channel_id"])
                     if channel: await channel.delete()
@@ -224,9 +235,23 @@ def is_admin(user_id): return user_id in ADMIN_IDS
 
 def get_user_data(user_id):
     data = col_users.find_one({"_id": user_id})
+    # Create new if doesn't exist
     if not data:
         data = {"_id": user_id, "coins": 0, "daily_cd": None, "last_redeem": None, "current_private_channel_id": None, "invite_count": 0}
         col_users.insert_one(data)
+    
+    # 🔥 SELF-HEALING: Check for missing fields in old users
+    updates = {}
+    if "invite_count" not in data:
+        updates["invite_count"] = 0
+        data["invite_count"] = 0
+    if "coins" not in data:
+        updates["coins"] = 0
+        data["coins"] = 0
+        
+    if updates:
+        col_users.update_one({"_id": user_id}, {"$set": updates})
+        
     return data
 
 # =========================================
@@ -247,10 +272,12 @@ class GiveawayView(discord.ui.View):
         await interaction.response.send_message("✅ Entry Confirmed!", ephemeral=True)
 
 @bot.tree.command(name="giveaway", description="Admin: Start a giveaway")
-@app_commands.checks.cooldown(1, 300) # 🔥 5 Minute Cooldown
+@app_commands.checks.cooldown(1, 300) 
 async def giveaway(interaction: discord.Interaction, minutes: int, prize: str):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    end_time = datetime.utcnow() + timedelta(minutes=minutes)
+    
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    
     embed = discord.Embed(title="🎉 GIVEAWAY!", description=f"**Prize:** {prize}\n**Ends:** <t:{int(end_time.timestamp())}:R>\n\nClick 🎉 to join!", color=discord.Color.magenta())
     embed.set_footer(text=f"Hosted by {interaction.user.name}")
     gw_id = pymongo.ObjectId()
@@ -311,30 +338,21 @@ async def on_member_join(member):
             used_invite = inv
             break
     bot.invite_cache[guild_id] = {inv.code: inv.uses for inv in new_invites_obj}
-    if used_invite: col_invites.insert_one({"user_id": member.id, "inviter_id": used_invite.inviter.id, "joined_at": datetime.utcnow(), "valid": False})
+    if used_invite: col_invites.insert_one({"user_id": member.id, "inviter_id": used_invite.inviter.id, "joined_at": datetime.now(timezone.utc), "valid": False})
 
 @bot.event
 async def on_member_remove(member):
-    # 🔁 INVITE ROLLBACK
     record = col_invites.find_one({"user_id": member.id})
     if record:
         if record["valid"]:
             col_users.update_one({"_id": record["inviter_id"], "coins": {"$gte": 100}}, {"$inc": {"coins": -100, "invite_count": -1}})
         col_invites.delete_one({"_id": record["_id"]})
 
-    # 🔥 SAFE USER RESET (Reset coins, keep ID)
     col_users.update_one(
         {"_id": member.id},
-        {"$set": {
-            "coins": 0,
-            "daily_cd": None,
-            "last_redeem": None,
-            "current_private_channel_id": None,
-            "invite_count": 0
-        }}
+        {"$set": {"coins": 0, "daily_cd": None, "last_redeem": None, "current_private_channel_id": None, "invite_count": 0}}
     )
 
-    # 🧹 CLEAN PRIVATE CHANNEL
     ch_data = col_channels.find_one({"owner_id": member.id})
     if ch_data:
         try:
@@ -407,7 +425,6 @@ async def makeprivate(interaction: discord.Interaction, channel_type: str, name:
     data = get_user_data(uid)
     if data.get("current_private_channel_id") and not is_admin(uid): return await interaction.followup.send("❌ You already have a channel.")
 
-    # Parse Guests (Strict 2 Users Min)
     guests = [int(id) for id in re.findall(r'<@!?(\d+)>', members)]
     guests = list(set(guests))
     if uid in guests: guests.remove(uid)
@@ -426,7 +443,7 @@ async def makeprivate(interaction: discord.Interaction, channel_type: str, name:
     embed = discord.Embed(title=f"🔒 {channel_type.title()} Room Request", description=f"{interaction.user.mention} wants to open a private room.\n\n**Guests:** {' '.join([f'<@{g}>' for g in guests])}\n**Price Paid:** {price}\n**Duration:** {duration}h\n\n*Waiting for at least 1 guest to Accept...*", color=discord.Color.gold())
     
     msg = await interaction.followup.send(embed=embed, view=RequestView(req_id, guests))
-    col_requests.insert_one({"_id": req_id, "host_id": uid, "guests": guests, "type": channel_type, "name": name, "price": price, "end_time": datetime.utcnow() + timedelta(hours=duration), "expires_at": datetime.utcnow() + timedelta(minutes=30), "msg_id": msg.id, "msg_channel_id": interaction.channel.id})
+    col_requests.insert_one({"_id": req_id, "host_id": uid, "guests": guests, "type": channel_type, "name": name, "price": price, "end_time": datetime.now(timezone.utc) + timedelta(hours=duration), "expires_at": datetime.now(timezone.utc) + timedelta(minutes=30), "msg_id": msg.id, "msg_channel_id": interaction.channel.id})
 
 # =========================================
 # 💰 COMMANDS
@@ -445,15 +462,20 @@ async def daily(interaction: discord.Interaction):
     await interaction.response.defer()
     uid = interaction.user.id
     d = get_user_data(uid)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     msg_extra = ""
     if d.get("daily_cd") and not is_admin(uid):
-        if now < d["daily_cd"]: 
-            diff = d["daily_cd"] - now
+        # Timezone aware comparison
+        daily_cd = d["daily_cd"].replace(tzinfo=timezone.utc) if d["daily_cd"].tzinfo is None else d["daily_cd"]
+        if now < daily_cd: 
+            diff = daily_cd - now
             return await interaction.followup.send(f"⏳ Come back in {int(diff.total_seconds()//3600)}h.")
     
-    if is_admin(uid) and d.get("daily_cd") and now < d["daily_cd"]: msg_extra = " *(Admin Bypass)*"
+    if is_admin(uid) and d.get("daily_cd"):
+         daily_cd = d["daily_cd"].replace(tzinfo=timezone.utc) if d["daily_cd"].tzinfo is None else d["daily_cd"]
+         if now < daily_cd: msg_extra = " *(Admin Bypass)*"
+
     col_users.update_one({"_id": uid}, {"$inc": {"coins": 100}, "$set": {"daily_cd": now + timedelta(hours=24)}})
     await interaction.followup.send(f"💰 +100 Coins!{msg_extra}")
 
@@ -466,7 +488,8 @@ async def redeem(interaction: discord.Interaction, code: str):
     uid = interaction.user.id
     d = get_user_data(uid)
     if d.get("last_redeem") and not is_admin(uid):
-        if (datetime.utcnow() - d["last_redeem"]) < timedelta(hours=24): return await interaction.followup.send("⏳ 24h Cooldown.")
+        last_redeem = d["last_redeem"].replace(tzinfo=timezone.utc) if d["last_redeem"].tzinfo is None else d["last_redeem"]
+        if (datetime.now(timezone.utc) - last_redeem) < timedelta(hours=24): return await interaction.followup.send("⏳ 24h Cooldown.")
     
     cd = col_codes.find_one({"code": code})
     if not cd: return await interaction.followup.send("❌ Invalid Code.")
@@ -479,12 +502,12 @@ async def redeem(interaction: discord.Interaction, code: str):
     
     col_codes.delete_one({"code": code})
     chan = await guild.create_text_channel(f"redeem-{interaction.user.name[:10]}", overwrites=overwrites)
-    col_users.update_one({"_id": uid}, {"$set": {"last_redeem": datetime.utcnow()}})
+    col_users.update_one({"_id": uid}, {"$set": {"last_redeem": datetime.now(timezone.utc)}})
     
     log_ch = bot.get_channel(CH_CODE_USE_LOG)
     if log_ch: await log_ch.send(f"`{code}` used by {interaction.user.mention}")
 
-    col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": code, "service": cd['service'], "start_time": datetime.utcnow(), "warned_10": False, "warned_20": False})
+    col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": code, "service": cd['service'], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
     
     embed = discord.Embed(title="🎉 Success", color=discord.Color.green())
     embed.add_field(name="Login", value=f"E: `{cd['email']}`\nP: `{cd['password']}`")
@@ -496,7 +519,9 @@ async def redeem(interaction: discord.Interaction, code: str):
 async def invites(interaction: discord.Interaction):
     d = get_user_data(interaction.user.id)
     pending = col_invites.count_documents({"inviter_id": interaction.user.id, "valid": False})
-    await interaction.response.send_message(f"📩 **Invites:** {d['invite_count']} Valid | {pending} Pending (24h)", ephemeral=True)
+    # FIXED: Use .get to safely access invite_count
+    count = d.get('invite_count', 0)
+    await interaction.response.send_message(f"📩 **Invites:** {count} Valid | {pending} Pending (24h)", ephemeral=True)
 
 @bot.tree.command(name="clear", description="Admin: Clear messages")
 async def clear(interaction: discord.Interaction, amount: int):
@@ -515,7 +540,6 @@ async def givecoins(interaction: discord.Interaction, user: discord.Member, amou
 
 @bot.tree.command(name="pay", description="Pay coins")
 async def pay(interaction: discord.Interaction, user: discord.Member, amount: int):
-    # 🔥 SECURITY: Prevent invalid or massive amounts
     if amount <= 0 or amount > 1_000_000: return await interaction.response.send_message("❌ Invalid amount (Max 1M).", ephemeral=True)
     if interaction.user.id == user.id: return await interaction.response.send_message("❌ Cannot pay self.", ephemeral=True)
     
@@ -594,14 +618,47 @@ async def ann(interaction: discord.Interaction, channel: discord.TextChannel, ti
 @bot.tree.command(name="lock", description="Admin: Lock")
 async def lock(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    # FULL LOCK: Messages, Threads, Public/Private Threads
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role, 
+        send_messages=False, 
+        send_messages_in_threads=False,
+        create_public_threads=False,
+        create_private_threads=False
+    )
+    # Also lock for Member role if exists
+    role = discord.utils.get(interaction.guild.roles, name="Member")
+    if role:
+        await interaction.channel.set_permissions(
+            role, 
+            send_messages=False, 
+            send_messages_in_threads=False,
+            create_public_threads=False,
+            create_private_threads=False
+        )
+        
     col_settings.update_one({"_id": "config"}, {"$set": {"locked": True}})
-    await interaction.response.send_message("🔒 Locked.")
+    await interaction.response.send_message("🔒 Locked (Full Block).")
 
 @bot.tree.command(name="unlock", description="Admin: Unlock")
 async def unlock(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=None)
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role, 
+        send_messages=None, 
+        send_messages_in_threads=None,
+        create_public_threads=None,
+        create_private_threads=None
+    )
+    role = discord.utils.get(interaction.guild.roles, name="Member")
+    if role:
+        await interaction.channel.set_permissions(
+            role, 
+            send_messages=None, 
+            send_messages_in_threads=None,
+            create_public_threads=None,
+            create_private_threads=None
+        )
     col_settings.update_one({"_id": "config"}, {"$set": {"locked": False}})
     await interaction.response.send_message("🔓 Unlocked.")
 
