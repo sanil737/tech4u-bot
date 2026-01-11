@@ -18,7 +18,7 @@ TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 DB_NAME = "enjoined_gaming_db"
-# ⚠️ IMPORTANT: MAKE SURE YOUR ID IS HERE
+# ⚠️ ADMIN IDS
 ADMIN_IDS = [986251574982606888, 1458812527055212585]
 
 # 📌 CHANNELS
@@ -125,20 +125,20 @@ class EGBot(commands.Bot):
                 col_vouch.delete_one({"_id": p["_id"]})
                 continue
 
-            # 10 Min Reminder
+            # 10 Min Reminder (To User & Warnings Channel)
             if elapsed >= 10 and not p.get("warned_10"):
                 if user: 
                     await channel.send(f"⚠️ {user.mention} **Reminder:** 20 mins left to Vouch!\nFormat: `[{p['code_used']}] I got {p['service']}, thanks @admin`")
                     if warning_channel:
-                        await warning_channel.send(f"⚠️ {user.mention} Reminder: `[{p['code_used']}] I got {p['service']}, thanks @admin`")
+                        await warning_channel.send(f"⚠️ {user.mention} Reminder to make vouch: `[{p['code_used']}] I got {p['service']}, thanks @admin`")
                 col_vouch.update_one({"_id": p["_id"]}, {"$set": {"warned_10": True}})
 
-            # 20 Min Warning
+            # 20 Min Warning (To User & Warnings Channel)
             elif elapsed >= 20 and not p.get("warned_20"):
                 if user: 
                     await channel.send(f"🚨 {user.mention} **FINAL WARNING:** 10 mins left or **BAN**.")
                     if warning_channel:
-                        await warning_channel.send(f"🚨 {user.mention} **FINAL WARNING:** Vouch now or get banned.")
+                        await warning_channel.send(f"🚨 {user.mention} **FINAL WARNING:** You have 10 minutes to vouch or you will be banned.")
                 col_vouch.update_one({"_id": p["_id"]}, {"$set": {"warned_20": True}})
 
             # 30 Min BAN & DELETE
@@ -147,15 +147,15 @@ class EGBot(commands.Bot):
                     try: 
                         await user.ban(reason="No Vouch (Auto-Ban)", delete_message_days=0)
                         if warning_channel: 
-                            embed = discord.Embed(title="🚫 User Banned", description=f"{user.mention} failed to vouch.", color=discord.Color.red())
+                            embed = discord.Embed(title="🚫 User Banned", description=f"{user.mention} failed to vouch for {p['service']}.", color=discord.Color.red())
                             await warning_channel.send(embed=embed)
                     except Exception as e: print(f"Failed to ban: {e}")
 
                 col_vouch.delete_one({"_id": p["_id"]})
                 if channel: 
-                    await channel.send("🔒 Deleting channel...")
+                    await channel.send("🔒 Time expired. Deleting channel...")
                     await asyncio.sleep(2)
-                    await channel.delete(reason="Expired")
+                    await channel.delete(reason="Vouch time expired")
 
     @tasks.loop(minutes=1)
     async def check_giveaways(self):
@@ -204,7 +204,7 @@ class EGBot(commands.Bot):
                     ch = self.get_channel(r["msg_channel_id"])
                     if ch:
                         msg = await ch.fetch_message(r["msg_id"])
-                        await msg.edit(content=f"❌ **Request Expired.** Refunded.", view=None, embed=None)
+                        await msg.edit(content=f"❌ **Request Expired.** Coins refunded to <@{r['host_id']}>.", view=None, embed=None)
                 except: pass
 
     @tasks.loop(seconds=60)
@@ -253,7 +253,8 @@ async def shop(interaction: discord.Interaction):
     embed = discord.Embed(title="🛒 EG Coin Shop", description="Use `/buy [service]` to purchase.", color=discord.Color.green())
     if not items: embed.description = "🚫 Out of Stock"
     else:
-        for item in items: embed.add_field(name=f"📦 {item['_id']}", value=f"💰 {item['price']} Coins\n📊 Stock: {item['count']}", inline=False)
+        for item in items:
+            embed.add_field(name=f"📦 {item['_id']}", value=f"💰 Price: **{item['price']}**\n📊 Stock: **{item['count']}**", inline=False)
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="buy", description="Buy an item with coins")
@@ -277,7 +278,12 @@ async def buy(interaction: discord.Interaction, service: str):
     col_users.update_one({"_id": uid}, {"$inc": {"coins": -item["price"]}, "$set": {"last_redeem": datetime.now(timezone.utc)}})
     
     guild = interaction.guild
-    overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)}
+    # ✅ PERMISSIONS: FORCE USER SEND_MESSAGES=TRUE
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
     for aid in ADMIN_IDS:
         m = guild.get_member(aid)
         if m: overwrites[m] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -287,11 +293,15 @@ async def buy(interaction: discord.Interaction, service: str):
 
     col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": item["price"], "service": item["service"], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
 
-    embed = discord.Embed(title="🎉 Purchase Successful", color=discord.Color.green())
-    embed.add_field(name="Details", value=f"```\n{item['details']}\n```")
-    embed.set_footer(text="VOUCH IN 30 MINS OR BAN")
+    # 🎨 EXACT EMBED MATCH
+    embed = discord.Embed(title="🎁 Account Details", description="⏰ **Channel deletes in 30 mins.**", color=discord.Color.green())
+    embed.add_field(name="Service", value=item['service'], inline=False)
+    embed.add_field(name="ID", value=f"```\n{item['details'].split(' ')[0] if ' ' in item['details'] else 'See below'}\n```", inline=False)
+    embed.add_field(name="Details/Pass", value=f"```\n{item['details']}\n```", inline=False)
+    
     await chan.send(f"{interaction.user.mention}", embed=embed)
-    await chan.send(f"**VOUCH FORMAT:** `[{item['price']}] I got {item['service']}, thanks @admin`")
+    await chan.send(f"📢 **VOUCH REQUIRED:** `{item['price']} I got {item['service']}, thanks @admin`")
+    
     await interaction.followup.send(f"✅ Purchased! Check {chan.mention}")
 
 # =========================================
@@ -318,7 +328,6 @@ async def on_member_join(member):
     guild_id = member.guild.id
     if guild_id not in bot.invite_cache: return
     old_invites = bot.invite_cache[guild_id]
-    
     try: new_invites_obj = await member.guild.invites()
     except: return
 
@@ -403,7 +412,6 @@ class RequestView(discord.ui.View):
 @app_commands.describe(members="Mention users (Required)")
 async def makeprivate(interaction: discord.Interaction, channel_type: str, name: str, duration: int, members: str):
     await interaction.response.defer(ephemeral=False)
-    
     try:
         config = col_settings.find_one({"_id": "config"})
         if config["panic"] and not is_admin(interaction.user.id): return await interaction.followup.send("🔒 Maintenance.")
@@ -486,7 +494,12 @@ async def redeem(interaction: discord.Interaction, code: str):
     if not cd: return await interaction.followup.send("❌ Invalid Code.")
     
     guild = interaction.guild
-    overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)}
+    # ✅ PERMISSIONS: FORCE USER SEND_MESSAGES=TRUE
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
     for aid in ADMIN_IDS:
         m = guild.get_member(aid)
         if m: overwrites[m] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -499,10 +512,14 @@ async def redeem(interaction: discord.Interaction, code: str):
 
     col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": code, "service": cd['service'], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
     
-    embed = discord.Embed(title="🎉 Success", color=discord.Color.green())
-    embed.add_field(name="Login", value=f"E: `{cd['email']}`\nP: `{cd['password']}`")
+    # 🎨 EXACT EMBED MATCH
+    embed = discord.Embed(title="🎁 Account Details", description="⏰ **Channel deletes in 30 mins.**", color=discord.Color.green())
+    embed.add_field(name="Service", value=cd['service'], inline=False)
+    embed.add_field(name="ID", value=f"`{cd['email']}`", inline=False)
+    embed.add_field(name="Pass", value=f"`{cd['password']}`", inline=False)
+    
     await chan.send(f"{interaction.user.mention}", embed=embed)
-    await chan.send(f"**VOUCH:** `[{code}] I got {cd['service']}, thanks @admin`")
+    await chan.send(f"📢 **VOUCH REQUIRED:** `{code} I got {cd['service']}, thanks @admin`")
     await interaction.followup.send(f"✅ Created: {chan.mention}")
 
 @bot.tree.command(name="invites", description="Show stats")
@@ -531,7 +548,28 @@ async def unlock(interaction: discord.Interaction):
     col_settings.update_one({"_id": "config"}, {"$set": {"locked": False}})
     await interaction.response.send_message("🔓 Unlocked.")
 
-@bot.tree.command(name="seecodes", description="Admin: See codes/items")
+@bot.tree.command(name="addcoins", description="Admin: Add coins to user")
+async def addcoins(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    get_user_data(user.id)
+    col_users.update_one({"_id": user.id}, {"$inc": {"coins": amount}})
+    await interaction.response.send_message(f"✅ Added {amount} to {user.mention}", ephemeral=True)
+
+@bot.tree.command(name="addcode", description="Admin: Add code")
+async def addcode(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    if col_codes.find_one({"code": code}): return await interaction.response.send_message("❌ Code exists.", ephemeral=True)
+    col_codes.insert_one({"code": code, "service": service, "email": email, "password": password})
+    await interaction.response.send_message(f"✅ Added `{code}`", ephemeral=True)
+
+@bot.tree.command(name="deletecode", description="Admin: Delete code")
+async def deletecode(interaction: discord.Interaction, code: str):
+    if not is_admin(interaction.user.id): return
+    res = col_codes.delete_one({"code": code})
+    if res.deleted_count > 0: await interaction.response.send_message(f"🗑️ Deleted", ephemeral=True)
+    else: await interaction.response.send_message("❌ Not found", ephemeral=True)
+
+@bot.tree.command(name="seecodes", description="Admin: See codes")
 async def seecodes(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return
     items = list(col_items.find({}))
@@ -600,29 +638,6 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(name="🛒", value="`/shop`\n`/buy`", inline=True)
     embed.add_field(name="🎁", value="`/redeem`\n`/makeprivatechannel`", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="addcoins", description="Admin: Add coins to user")
-async def addcoins(interaction: discord.Interaction, user: discord.Member, amount: int):
-    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    get_user_data(user.id)
-    col_users.update_one({"_id": user.id}, {"$inc": {"coins": amount}})
-    await interaction.response.send_message(f"✅ Added {amount} to {user.mention}", ephemeral=True)
-
-@bot.tree.command(name="addcode", description="Admin: Add code for /redeem")
-async def addcode(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
-    if not is_admin(interaction.user.id): 
-        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    if col_codes.find_one({"code": code}): 
-        return await interaction.response.send_message("❌ Code exists.", ephemeral=True)
-    col_codes.insert_one({"code": code, "service": service, "email": email, "password": password})
-    await interaction.response.send_message(f"✅ Added `{code}`", ephemeral=True)
-
-@bot.tree.command(name="deletecode", description="Admin: Delete code")
-async def deletecode(interaction: discord.Interaction, code: str):
-    if not is_admin(interaction.user.id): return
-    res = col_codes.delete_one({"code": code})
-    if res.deleted_count > 0: await interaction.response.send_message(f"🗑️ Deleted", ephemeral=True)
-    else: await interaction.response.send_message("❌ Not found", ephemeral=True)
 
 @bot.tree.command(name="ticketpanel", description="Admin: Panel")
 async def ticketpanel(interaction: discord.Interaction):
