@@ -28,10 +28,24 @@ CH_WARNINGS = 1459448651704303667
 CH_CODE_USE_LOG = 1459556690536960100
 CAT_PRIVATE_ROOMS = 1459557142850830489
 
-# Pricing
+# Pricing Configuration
 PRICES = {
-    "text": {2: {1: 400, 2: 700, 4: 1200}, 3: {1: 500, 2: 900, 4: 1500}, 4: {1: 600, 2: 1100, 4: 1800}, 5: {1: 750, 2: 1300, 4: 2100}, 6: {1: 900, 2: 1500, 4: 2500}, 7: {1: 1050, 2: 1700, 4: 2800}},
-    "voice": {2: {1: 500, 2: 900, 4: 1500}, 3: {1: 650, 2: 1100, 4: 1800}, 4: {1: 800, 2: 1400, 4: 2300}, 5: {1: 1000, 2: 1800, 4: 2900}, 6: {1: 1200, 2: 2100, 4: 3400}, 7: {1: 1400, 2: 2400, 4: 3900}}
+    "text": {
+        2: {1: 400, 2: 700, 4: 1200},
+        3: {1: 500, 2: 900, 4: 1500},
+        4: {1: 600, 2: 1100, 4: 1800},
+        5: {1: 750, 2: 1300, 4: 2100},
+        6: {1: 900, 2: 1500, 4: 2500},
+        7: {1: 1050, 2: 1700, 4: 2800}
+    },
+    "voice": {
+        2: {1: 500, 2: 900, 4: 1500},
+        3: {1: 650, 2: 1100, 4: 1800},
+        4: {1: 800, 2: 1400, 4: 2300},
+        5: {1: 1000, 2: 1800, 4: 2900},
+        6: {1: 1200, 2: 2100, 4: 3400},
+        7: {1: 1400, 2: 2400, 4: 3900}
+    }
 }
 
 EG_COND = """**EG cond:**\n• Respect everyone\n• Vouch after redeem\n• No abuse or spam\n• Follow admin instructions"""
@@ -137,7 +151,7 @@ class EGBot(commands.Bot):
                         await channel.send(f"🚨 {user.mention} **FINAL WARNING:** 10 mins left or channel will close.")
                     col_vouch.update_one({"_id": p["_id"]}, {"$set": {"warned_20": True}})
 
-                # 30 Min EXPIRY (Delete Channel + Log if no vouch)
+                # 30 Min EXPIRY
                 elif elapsed >= 30:
                     if warning_channel and user:
                         embed = discord.Embed(title="⚠️ Failed to Vouch", description=f"{user.mention} did not vouch for **{p['service']}** in time.", color=discord.Color.orange())
@@ -240,6 +254,24 @@ def get_user_data(user_id):
 # 🛍️ SHOP SYSTEM
 # =========================================
 
+@bot.tree.command(name="prices", description="Show private channel prices")
+async def prices(interaction: discord.Interaction):
+    embed = discord.Embed(title="🏷️ Private Room Pricing", color=discord.Color.gold())
+    
+    # Text Pricing
+    text_desc = ""
+    for users, costs in PRICES["text"].items():
+        text_desc += f"👥 **{users} Users**: 1h `🪙{costs[1]}` | 2h `🪙{costs[2]}` | 4h `🪙{costs[4]}`\n"
+    embed.add_field(name="💬 Text Channels", value=text_desc, inline=False)
+
+    # Voice Pricing
+    voice_desc = ""
+    for users, costs in PRICES["voice"].items():
+        voice_desc += f"👥 **{users} Users**: 1h `🪙{costs[1]}` | 2h `🪙{costs[2]}` | 4h `🪙{costs[4]}`\n"
+    embed.add_field(name="🔊 Voice Channels", value=voice_desc, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="additem", description="Admin: Add item to shop")
 async def additem(interaction: discord.Interaction, service: str, account_details: str, price: int):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
@@ -271,7 +303,6 @@ async def buy(interaction: discord.Interaction, service: str):
     
     if user_data["coins"] < item["price"]: return await interaction.followup.send(f"❌ Need {item['price']} coins.")
     
-    # Process
     col_items.delete_one({"_id": item["_id"]})
     col_users.update_one({"_id": uid}, {"$inc": {"coins": -item["price"]}, "$set": {"last_redeem": datetime.now(timezone.utc)}})
     
@@ -446,7 +477,6 @@ async def makeprivate(interaction: discord.Interaction, channel_type: str, name:
         
         embed = discord.Embed(title=f"🔒 {channel_type.title()} Room Request", description=f"{interaction.user.mention} wants a room.\n**Guests:** {' '.join([f'<@{g}>' for g in guests])}\n**Price:** {price}\n**Duration:** {duration}h", color=discord.Color.gold())
         msg = await interaction.followup.send(embed=embed, view=RequestView(req_id, guests))
-        # Pass 'hours' (duration) to DB for timer logic
         col_requests.insert_one({"_id": req_id, "host_id": uid, "guests": guests, "type": channel_type, "name": name, "price": price, "hours": duration, "end_time": datetime.now(timezone.utc) + timedelta(hours=duration), "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5), "msg_id": msg.id, "msg_channel_id": interaction.channel.id})
     except Exception as e:
         await interaction.followup.send(f"❌ Unexpected Error: {e}")
@@ -611,6 +641,24 @@ async def clear(interaction: discord.Interaction, amount: int):
     await interaction.channel.purge(limit=min(amount, 100))
     await interaction.followup.send("🧹 Done", ephemeral=True)
 
+@bot.tree.command(name="stock", description="Admin: Check stock")
+async def stock(interaction: discord.Interaction):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    pipeline = [{"$group": {"_id": "$service", "count": {"$sum": 1}}}]
+    items = list(col_items.aggregate(pipeline))
+    if not items: return await interaction.response.send_message("📦 Shop is empty.", ephemeral=True)
+    
+    text = "**📊 Current Stock:**\n"
+    for i in items:
+        text += f"• **{i['_id']}**: {i['count']} codes\n"
+    await interaction.response.send_message(text, ephemeral=True)
+
+@bot.tree.command(name="resetdaily", description="Admin: Reset user daily")
+async def resetdaily(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    col_users.update_one({"_id": user.id}, {"$set": {"daily_cd": None}})
+    await interaction.response.send_message(f"✅ Reset daily for {user.mention}", ephemeral=True)
+
 @bot.tree.command(name="panic", description="Admin: Panic")
 async def panic(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return
@@ -656,7 +704,7 @@ async def pay(interaction: discord.Interaction, user: discord.Member, amount: in
 @bot.tree.command(name="help", description="Show commands")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="EG BOT", color=discord.Color.blue())
-    embed.add_field(name="💰", value="`/daily`\n`/status`\n`/pay`", inline=True)
+    embed.add_field(name="💰", value="`/daily`\n`/status`\n`/pay`\n`/prices`", inline=True)
     embed.add_field(name="🛒", value="`/shop`\n`/buy`", inline=True)
     embed.add_field(name="🎁", value="`/redeem`\n`/makeprivatechannel`", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
