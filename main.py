@@ -31,8 +31,22 @@ CAT_PRIVATE_ROOMS = 1459557142850830489
 
 # Pricing
 PRICES = {
-    "text": {2: {1: 400, 2: 700, 4: 1200}, 3: {1: 500, 2: 900, 4: 1500}, 4: {1: 600, 2: 1100, 4: 1800}, 5: {1: 750, 2: 1300, 4: 2100}, 6: {1: 900, 2: 1500, 4: 2500}, 7: {1: 1050, 2: 1700, 4: 2800}},
-    "voice": {2: {1: 500, 2: 900, 4: 1500}, 3: {1: 650, 2: 1100, 4: 1800}, 4: {1: 800, 2: 1400, 4: 2300}, 5: {1: 1000, 2: 1800, 4: 2900}, 6: {1: 1200, 2: 2100, 4: 3400}, 7: {1: 1400, 2: 2400, 4: 3900}}
+    "text": {
+        2: {1: 400, 2: 700, 4: 1200},
+        3: {1: 500, 2: 900, 4: 1500},
+        4: {1: 600, 2: 1100, 4: 1800},
+        5: {1: 750, 2: 1300, 4: 2100},
+        6: {1: 900, 2: 1500, 4: 2500},
+        7: {1: 1050, 2: 1700, 4: 2800}
+    },
+    "voice": {
+        2: {1: 500, 2: 900, 4: 1500},
+        3: {1: 650, 2: 1100, 4: 1800},
+        4: {1: 800, 2: 1400, 4: 2300},
+        5: {1: 1000, 2: 1800, 4: 2900},
+        6: {1: 1200, 2: 2100, 4: 3400},
+        7: {1: 1400, 2: 2400, 4: 3900}
+    }
 }
 
 EG_COND = """**EG cond:**\n• Respect everyone\n• Vouch after redeem\n• No abuse or spam\n• Follow admin instructions"""
@@ -294,6 +308,7 @@ async def buy(interaction: discord.Interaction, service: str):
         "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False
     })
 
+    # 🔥 COUNTDOWN LOGIC
     delete_time = datetime.now(timezone.utc) + timedelta(minutes=30)
     timestamp = int(delete_time.timestamp())
 
@@ -718,6 +733,12 @@ async def close(interaction: discord.Interaction):
 # =========================================
 # 🎮 EVENTS
 # =========================================
+
+@bot.tree.command(name="ann", description="Admin: Announce")
+async def ann(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
+    if not is_admin(interaction.user.id): return
+    await channel.send(embed=discord.Embed(title=title, description=message, color=discord.Color.blue()))
+    await interaction.response.send_message("✅ Sent", ephemeral=True)
 
 @bot.event
 async def on_message(message):
