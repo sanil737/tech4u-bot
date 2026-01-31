@@ -9,7 +9,6 @@ import asyncio
 import re
 import traceback
 import random
-import string
 
 # =========================================
 # ⚙️ CONFIGURATION
@@ -19,6 +18,7 @@ TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 DB_NAME = "enjoined_gaming_db"
+# ⚠️ ADMIN IDS
 ADMIN_IDS = [986251574982606888, 1458812527055212585]
 
 # 📌 CHANNELS
@@ -27,10 +27,6 @@ CH_FIND_TEAM = 1459469475849175304
 CH_VOUCH_LOG = 1459448284530610288
 CH_WARNINGS = 1459448651704303667
 CH_CODE_USE_LOG = 1459556690536960100
-CH_FULL_MAP_RESULTS = 1293634663461421140 
-CH_FF_BET = 1467146811872641066
-CH_MVP_HIGHLIGHTS = 1467148516718809149
-CH_WEEKLY_LB = 1467148265597305046
 CAT_PRIVATE_ROOMS = 1459557142850830489
 CAT_TEAM_ROOMS = 1467172386821509316
 
@@ -53,7 +49,7 @@ BOOSTS = {
     "entry_refund": {"price": 150, "desc": "Get 50% back if you lose 1v1 (1 use)"},
 }
 
-# Pricing for Private Rooms
+# Pricing
 PRICES = {
     "text": {2: {1: 400, 2: 700, 4: 1200}, 3: {1: 500, 2: 900, 4: 1500}, 4: {1: 600, 2: 1100, 4: 1800}, 5: {1: 750, 2: 1300, 4: 2100}, 6: {1: 900, 2: 1500, 4: 2500}, 7: {1: 1050, 2: 1700, 4: 2800}},
     "voice": {2: {1: 500, 2: 900, 4: 1500}, 3: {1: 650, 2: 1100, 4: 1800}, 4: {1: 800, 2: 1400, 4: 2300}, 5: {1: 1000, 2: 1800, 4: 2900}, 6: {1: 1200, 2: 2100, 4: 3400}, 7: {1: 1400, 2: 2400, 4: 3900}}
@@ -105,7 +101,6 @@ class EGBot(commands.Bot):
         self.check_request_timeouts.start()
         self.check_giveaways.start()
         self.check_team_rent.start()
-        self.weekly_leaderboard_task.start()
         await self.tree.sync()
         print("✅ Commands Synced")
 
@@ -178,18 +173,6 @@ class EGBot(commands.Bot):
                         try: await channel.send(f"⚠️ **Rent Expired!**\nUse `/payteamrent` (Cost: {TEAM_CHANNEL_RENT}) to unlock.")
                         except: pass
 
-    @tasks.loop(hours=168)
-    async def weekly_leaderboard_task(self):
-        channel = self.get_channel(CH_WEEKLY_LB)
-        if not channel: return
-        top_users = col_users.find().sort("weekly_wins", -1).limit(10)
-        embed = discord.Embed(title="📊 WEEKLY LEADERBOARD", color=discord.Color.gold())
-        text = ""
-        for i, u in enumerate(top_users, 1): text += f"**{i}.** <@{u['_id']}> — 🏆 {u.get('weekly_wins', 0)} Wins\n"
-        embed.description = text if text else "No matches yet."
-        await channel.send(embed=embed)
-        col_users.update_many({}, {"$set": {"weekly_wins": 0}})
-
     @tasks.loop(seconds=60)
     async def check_channel_expiry(self):
         active = list(col_channels.find({}))
@@ -202,9 +185,6 @@ class EGBot(commands.Bot):
                     if channel: await channel.delete()
                     col_users.update_one({"_id": c["owner_id"]}, {"$set": {"current_private_channel_id": None}})
                     col_channels.delete_one({"_id": c["_id"]})
-                else:
-                    # Optional: Update main message for private channels dynamic timer
-                    pass 
             except: pass
 
     @tasks.loop(minutes=1)
@@ -414,45 +394,8 @@ async def registerteam(interaction: discord.Interaction, tournament_id: str, tea
     await chan.send(f"🔐 **IDP Created** for {team_name}\nLeader: {interaction.user.mention}")
     await interaction.response.send_message(f"✅ Registered! {chan.mention}", ephemeral=True)
 
-@bot.tree.command(name="submitresults", description="Admin: Process results")
-async def submitresults(interaction: discord.Interaction, tournament_id: str, data: str):
-    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    await interaction.response.defer()
-    
-    tourney = col_tournaments.find_one({"tid": tournament_id})
-    if not tourney: return await interaction.followup.send("❌ Invalid ID.")
-    
-    raw_entries = re.split(r'[,\n]', data)
-    results = []
-    for entry in raw_entries:
-        match = re.search(r'^(?P<name>.+?)\s+kill\s+(?P<kills>\d+)\s+placement\s+(?P<pos>\d+)', entry.strip(), re.IGNORECASE)
-        if match:
-            results.append({
-                "name": match.group("name").strip(),
-                "kills": int(match.group("kills")),
-                "pos": int(match.group("pos")),
-                "total": PLACEMENT_POINTS.get(int(match.group("pos")), 0) + (int(match.group("kills")) * KILL_POINT)
-            })
-    
-    sorted_results = sorted(results, key=lambda x: (-x['total'], -x['kills'], x['pos']))
-    prizes = tourney["distribution"]
-    
-    embed = discord.Embed(title=f"🏆 {tourney['name']} RESULTS", color=discord.Color.gold())
-    desc = ""
-    for i, res in enumerate(sorted_results):
-        prize_txt = f" • **Won: {prizes[i]} EG**" if i < 3 else ""
-        desc += f"**#{i+1} {res['name']}** - {res['total']} Pts{prize_txt}\n"
-    
-    embed.description = desc
-    res_chan = bot.get_channel(CH_FULL_MAP_RESULTS)
-    if res_chan: await res_chan.send(embed=embed)
-    
-    col_tournaments.update_one({"tid": tournament_id}, {"$set": {"status": "finished"}})
-    # Cleanup logic omitted for brevity but IDPs can be deleted manually or by loop
-    await interaction.followup.send("✅ Results posted.")
-
 # =========================================
-# ⚔️ 1v1 MATCH & BOOSTS
+# ⚔️ 1v1 RE-MATCH & BOOSTS
 # =========================================
 
 class RematchView(discord.ui.View):
@@ -729,6 +672,30 @@ async def close(interaction: discord.Interaction):
     await interaction.response.send_message("👋 Closing in 5 seconds...")
     await asyncio.sleep(5)
     await interaction.channel.delete()
+
+@bot.tree.command(name="ticketpanel", description="Admin: Send ticket panel")
+async def ticketpanel(interaction: discord.Interaction):
+    if not is_admin(interaction.user.id): return
+    
+    class TicketView(discord.ui.View):
+        def __init__(self): super().__init__(timeout=None)
+        @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.green, custom_id="tic_open")
+        async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+            ow = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                interaction.guild.me: discord.PermissionOverwrite(read_messages=True, manage_channels=True)
+            }
+            for aid in ADMIN_IDS:
+                m = interaction.guild.get_member(aid)
+                if m: ow[m] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            
+            c = await interaction.guild.create_text_channel(f"ticket-{interaction.user.name}", overwrites=ow, topic=f"Ticket Owner: {interaction.user.id}")
+            await c.send(f"{interaction.user.mention} Support will be with you shortly. Use `/close` to close.", view=None)
+            await interaction.response.send_message(f"✅ Created: {c.mention}", ephemeral=True)
+
+    await interaction.channel.send("📩 **Need Help?** Click below.", view=TicketView())
+    await interaction.response.send_message("✅ Panel Sent", ephemeral=True)
 
 @bot.event
 async def on_message(message):
