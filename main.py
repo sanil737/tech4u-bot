@@ -9,6 +9,7 @@ import asyncio
 import re
 import traceback
 import random
+import string
 
 # =========================================
 # ⚙️ CONFIGURATION
@@ -18,7 +19,6 @@ TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 DB_NAME = "enjoined_gaming_db"
-# ⚠️ ADMIN IDS
 ADMIN_IDS = [986251574982606888, 1458812527055212585]
 
 # 📌 CHANNELS
@@ -26,7 +26,10 @@ CH_WELCOME = 1459444229255200971
 CH_FIND_TEAM = 1459469475849175304
 CH_VOUCH_LOG = 1459448284530610288
 CH_WARNINGS = 1459448651704303667
-CH_CODE_USE_LOG = 1459556690536960100
+CH_FULL_MAP_RESULTS = 1293634663461421140 
+CH_FF_BET = 1467146811872641066
+CH_MVP_HIGHLIGHTS = 1467148516718809149
+CH_WEEKLY_LB = 1467148265597305046
 CAT_PRIVATE_ROOMS = 1459557142850830489
 CAT_TEAM_ROOMS = 1467172386821509316
 
@@ -44,12 +47,15 @@ COST_ADD_TIME = 100
 
 # ⚡ BOOSTS CONFIG
 BOOSTS = {
-    "streak_protection": {"price": 200, "desc": "Losing 1v1 won't reset streak (1 use)"},
-    "double_coins": {"price": 300, "desc": "Double win coins in next 1v1 (1 use)"},
-    "entry_refund": {"price": 150, "desc": "Get 50% back if you lose 1v1 (1 use)"},
+    "double_coins": {"price": 300, "desc": "Double win coins in next 1v1"},
+    "streak_protection": {"price": 200, "desc": "Losing 1v1 won't reset streak"},
+    "entry_refund": {"price": 150, "desc": "Get 50% back if you lose 1v1"},
+    "extra_life": {"price": 250, "desc": "Retry without losing coins (Visual)"},
+    "lucky_boost": {"price": 100, "desc": "10% chance to earn bonus coins"},
+    "coin_shield": {"price": 180, "desc": "Protect coins in risky matches"}
 }
 
-# Pricing
+# Pricing for Private Rooms
 PRICES = {
     "text": {2: {1: 400, 2: 700, 4: 1200}, 3: {1: 500, 2: 900, 4: 1500}, 4: {1: 600, 2: 1100, 4: 1800}, 5: {1: 750, 2: 1300, 4: 2100}, 6: {1: 900, 2: 1500, 4: 2500}, 7: {1: 1050, 2: 1700, 4: 2800}},
     "voice": {2: {1: 500, 2: 900, 4: 1500}, 3: {1: 650, 2: 1100, 4: 1800}, 4: {1: 800, 2: 1400, 4: 2300}, 5: {1: 1000, 2: 1800, 4: 2900}, 6: {1: 1200, 2: 2100, 4: 3400}, 7: {1: 1400, 2: 2400, 4: 3900}}
@@ -65,14 +71,9 @@ mongo_client = pymongo.MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 
 col_users = db["users"]
-col_codes = db["codes"]
-col_items = db["shop_items"]
-col_vouch = db["vouch_pending"]
 col_channels = db["active_channels"]
 col_settings = db["settings"]
-col_invites = db["invites_tracking"]
 col_requests = db["pending_requests"]
-col_giveaways = db["active_giveaways"]
 col_tournaments = db["tournaments"]
 col_tournament_teams = db["tournament_teams"]
 col_teams = db["teams"] 
@@ -90,27 +91,18 @@ class EGBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = True
         intents.message_content = True
-        intents.invites = True
         super().__init__(command_prefix=".", intents=intents)
-        self.invite_cache = {}
 
     async def setup_hook(self):
-        self.check_vouch_timers.start()
         self.check_channel_expiry.start()
-        self.check_invite_validation.start()
         self.check_request_timeouts.start()
-        self.check_giveaways.start()
         self.check_team_rent.start()
+        self.weekly_leaderboard_task.start()
         await self.tree.sync()
         print("✅ Commands Synced")
 
     async def on_ready(self):
         print(f"✅ Logged in as {self.user}")
-        for guild in self.guilds:
-            try:
-                invs = await guild.invites()
-                self.invite_cache[guild.id] = {inv.code: inv.uses for inv in invs}
-            except: pass
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         error_msg = str(error)
@@ -123,39 +115,6 @@ class EGBot(commands.Bot):
             await interaction.response.send_message(f"⚠️ Error: {error_msg}", ephemeral=True)
 
     # 🔄 TASKS
-    @tasks.loop(seconds=30)
-    async def check_vouch_timers(self):
-        pending = list(col_vouch.find({}))
-        now = datetime.now(timezone.utc)
-        warning_channel = self.get_channel(CH_WARNINGS)
-        for p in pending:
-            try:
-                start_time = p["start_time"].replace(tzinfo=timezone.utc) if p["start_time"].tzinfo is None else p["start_time"]
-                elapsed = (now - start_time).total_seconds() / 60
-                channel = self.get_channel(p["channel_id"])
-                
-                if not channel:
-                    col_vouch.delete_one({"_id": p["_id"]})
-                    continue
-                
-                user = self.get_guild(p.get("guild_id", 0)).get_member(p["user_id"]) if p.get("guild_id") else None
-
-                if elapsed >= 10 and not p.get("warned_10"):
-                    if user: await channel.send(f"⚠️ {user.mention} Reminder: 20m left to Vouch!")
-                    col_vouch.update_one({"_id": p["_id"]}, {"$set": {"warned_10": True}})
-                elif elapsed >= 20 and not p.get("warned_20"):
-                    if user: await channel.send(f"🚨 {user.mention} **FINAL WARNING**")
-                    col_vouch.update_one({"_id": p["_id"]}, {"$set": {"warned_20": True}})
-                elif elapsed >= 30:
-                    if warning_channel and user:
-                        embed = discord.Embed(title="⚠️ Failed to Vouch", description=f"{user.mention} did not vouch for **{p['service']}**.", color=discord.Color.orange())
-                        await warning_channel.send(embed=embed)
-                    await channel.send("🔒 Deleting...")
-                    await asyncio.sleep(2)
-                    await channel.delete()
-                    col_vouch.delete_one({"_id": p["_id"]})
-            except: pass
-
     @tasks.loop(hours=6)
     async def check_team_rent(self):
         teams = col_teams.find({})
@@ -173,6 +132,18 @@ class EGBot(commands.Bot):
                         try: await channel.send(f"⚠️ **Rent Expired!**\nUse `/payteamrent` (Cost: {TEAM_CHANNEL_RENT}) to unlock.")
                         except: pass
 
+    @tasks.loop(hours=168)
+    async def weekly_leaderboard_task(self):
+        channel = self.get_channel(CH_WEEKLY_LB)
+        if not channel: return
+        top_users = col_users.find().sort("weekly_wins", -1).limit(10)
+        embed = discord.Embed(title="📊 WEEKLY LEADERBOARD", color=discord.Color.gold())
+        text = ""
+        for i, u in enumerate(top_users, 1): text += f"**{i}.** <@{u['_id']}> — 🏆 {u.get('weekly_wins', 0)} Wins\n"
+        embed.description = text if text else "No matches yet."
+        await channel.send(embed=embed)
+        col_users.update_many({}, {"$set": {"weekly_wins": 0}})
+
     @tasks.loop(seconds=60)
     async def check_channel_expiry(self):
         active = list(col_channels.find({}))
@@ -186,36 +157,6 @@ class EGBot(commands.Bot):
                     col_users.update_one({"_id": c["owner_id"]}, {"$set": {"current_private_channel_id": None}})
                     col_channels.delete_one({"_id": c["_id"]})
             except: pass
-
-    @tasks.loop(minutes=1)
-    async def check_giveaways(self):
-        active = col_giveaways.find({})
-        now = datetime.now(timezone.utc)
-        for gw in active:
-            end = gw["end_time"].replace(tzinfo=timezone.utc) if gw["end_time"].tzinfo is None else gw["end_time"]
-            if now >= end:
-                ch = self.get_channel(gw["channel_id"])
-                if ch:
-                    try:
-                        msg = await ch.fetch_message(gw["message_id"])
-                        guild = ch.guild
-                        valid = [u for u in gw["entries"] if guild.get_member(u)]
-                        if valid:
-                            win = random.choice(valid)
-                            await msg.reply(f"🎉 Winner: <@{win}> | Prize: **{gw['prize']}**")
-                        else: await msg.reply("❌ No valid entries.")
-                    except: pass
-                col_giveaways.delete_one({"_id": gw["_id"]})
-
-    @tasks.loop(minutes=10)
-    async def check_invite_validation(self):
-        pending = col_invites.find({"valid": False})
-        now = datetime.now(timezone.utc)
-        for inv in pending:
-            join = inv["joined_at"].replace(tzinfo=timezone.utc) if inv["joined_at"].tzinfo is None else inv["joined_at"]
-            if now > (join + timedelta(hours=24)):
-                col_invites.update_one({"_id": inv["_id"]}, {"$set": {"valid": True}})
-                col_users.update_one({"_id": inv["inviter_id"]}, {"$inc": {"coins": 100, "invite_count": 1}})
 
     @tasks.loop(minutes=1)
     async def check_request_timeouts(self):
@@ -343,17 +284,28 @@ async def payteamrent(interaction: discord.Interaction):
     if not data.get("team_id"): return await interaction.response.send_message("❌ Not in a team.", ephemeral=True)
     if data["coins"] < TEAM_CHANNEL_RENT: return await interaction.response.send_message(f"❌ Need {TEAM_CHANNEL_RENT} coins.", ephemeral=True)
     
-    new_expiry = datetime.now(timezone.utc) + timedelta(days=7)
+    # 🔥 STACK TIME LOGIC
+    team = col_teams.find_one({"_id": data["team_id"]})
+    current_expiry = team.get("rent_expiry")
+    
+    # If expired or None, start from now. If active, add to existing time.
+    now = datetime.now(timezone.utc)
+    if current_expiry and current_expiry.tzinfo is None: current_expiry = current_expiry.replace(tzinfo=timezone.utc)
+
+    if not current_expiry or current_expiry < now:
+        new_expiry = now + timedelta(days=7)
+    else:
+        new_expiry = current_expiry + timedelta(days=7)
+
     col_users.update_one({"_id": uid}, {"$inc": {"coins": -TEAM_CHANNEL_RENT}})
     col_teams.update_one({"_id": data["team_id"]}, {"$set": {"rent_expiry": new_expiry}})
     
-    team = col_teams.find_one({"_id": data["team_id"]})
     chan = interaction.guild.get_channel(team["channel_id"])
     if chan:
         for mid in team["members"]:
             mem = interaction.guild.get_member(mid)
             if mem: await chan.set_permissions(mem, read_messages=True, send_messages=True)
-        await chan.send(f"✅ **Rent Paid!** Chat unlocked for 7 days.")
+        await chan.send(f"✅ **Rent Paid!** Chat unlocked.\nExpires: <t:{int(new_expiry.timestamp())}:R>")
     await interaction.response.send_message(f"✅ Paid {TEAM_CHANNEL_RENT} coins.")
 
 # =========================================
@@ -394,8 +346,44 @@ async def registerteam(interaction: discord.Interaction, tournament_id: str, tea
     await chan.send(f"🔐 **IDP Created** for {team_name}\nLeader: {interaction.user.mention}")
     await interaction.response.send_message(f"✅ Registered! {chan.mention}", ephemeral=True)
 
+@bot.tree.command(name="submitresults", description="Admin: Process results")
+async def submitresults(interaction: discord.Interaction, tournament_id: str, data: str):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer()
+    
+    tourney = col_tournaments.find_one({"tid": tournament_id})
+    if not tourney: return await interaction.followup.send("❌ Invalid ID.")
+    
+    raw_entries = re.split(r'[,\n]', data)
+    results = []
+    for entry in raw_entries:
+        match = re.search(r'^(?P<name>.+?)\s+kill\s+(?P<kills>\d+)\s+placement\s+(?P<pos>\d+)', entry.strip(), re.IGNORECASE)
+        if match:
+            results.append({
+                "name": match.group("name").strip(),
+                "kills": int(match.group("kills")),
+                "pos": int(match.group("pos")),
+                "total": PLACEMENT_POINTS.get(int(match.group("pos")), 0) + (int(match.group("kills")) * KILL_POINT)
+            })
+    
+    sorted_results = sorted(results, key=lambda x: (-x['total'], -x['kills'], x['pos']))
+    prizes = tourney["distribution"]
+    
+    embed = discord.Embed(title=f"🏆 {tourney['name']} RESULTS", color=discord.Color.gold())
+    desc = ""
+    for i, res in enumerate(sorted_results):
+        prize_txt = f" • **Won: {prizes[i]} EG**" if i < 3 else ""
+        desc += f"**#{i+1} {res['name']}** - {res['total']} Pts{prize_txt}\n"
+    
+    embed.description = desc
+    res_chan = bot.get_channel(CH_FULL_MAP_RESULTS)
+    if res_chan: await res_chan.send(embed=embed)
+    
+    col_tournaments.update_one({"tid": tournament_id}, {"$set": {"status": "finished"}})
+    await interaction.followup.send("✅ Results posted.")
+
 # =========================================
-# ⚔️ 1v1 RE-MATCH & BOOSTS
+# ⚔️ 1v1 MATCH & BOOSTS
 # =========================================
 
 class RematchView(discord.ui.View):
@@ -444,13 +432,78 @@ async def winner(interaction: discord.Interaction, winner: discord.Member, score
     col_matches.delete_one({"_id": match["_id"]})
 
 @bot.tree.command(name="buy_boost", description="Buy gameplay boost")
-@app_commands.choices(boost=[app_commands.Choice(name=k.replace("_", " ").title(), value=k) for k in BOOSTS.keys()])
+@app_commands.choices(boost=[app_commands.Choice(name=f"{k.replace('_', ' ').title()} ({v['price']})", value=k) for k, v in BOOSTS.items()])
 async def buy_boost(interaction: discord.Interaction, boost: str):
     data = get_user_data(interaction.user.id)
     cost = BOOSTS[boost]["price"]
     if data["coins"] < cost: return await interaction.response.send_message(f"❌ Need {cost} coins.", ephemeral=True)
     col_users.update_one({"_id": interaction.user.id}, {"$inc": {"coins": -cost}, "$set": {f"boosts.{boost}": True}})
     await interaction.response.send_message(f"✅ Purchased **{boost}**!", ephemeral=True)
+
+# =========================================
+# 🔎 FIND TEAM (YES/NO BUTTON SYSTEM)
+# =========================================
+
+class JoinTeamView(discord.ui.View):
+    def __init__(self, host_id):
+        super().__init__(timeout=1800) # 30 mins
+        self.host_id = host_id
+
+    @discord.ui.button(label="✋ Request to Join", style=discord.ButtonStyle.green)
+    async def request_join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id == self.host_id: return await interaction.response.send_message("❌ You are the host.", ephemeral=True)
+        
+        await interaction.response.send_message("✅ Request sent to host!", ephemeral=True)
+        
+        # Notify Host
+        host = interaction.guild.get_member(self.host_id)
+        if host:
+            try:
+                view = AcceptTeamRequestView(interaction.user.id, interaction.guild)
+                await host.send(f"📩 **{interaction.user.name}** wants to join your team!", view=view)
+            except:
+                await interaction.channel.send(f"{host.mention}, **{interaction.user.name}** wants to join! (Enable DMs)")
+
+class AcceptTeamRequestView(discord.ui.View):
+    def __init__(self, applicant_id, guild):
+        super().__init__(timeout=300)
+        self.applicant_id = applicant_id
+        self.guild = guild
+
+    @discord.ui.button(label="✅ Accept (Create Room)", style=discord.ButtonStyle.green)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        applicant = self.guild.get_member(self.applicant_id)
+        if not applicant: return await interaction.response.send_message("❌ User left.", ephemeral=True)
+        
+        # Create Private Room
+        cat = self.guild.get_channel(CAT_PRIVATE_ROOMS)
+        overwrites = {
+            self.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            applicant: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        chan = await self.guild.create_text_channel(f"team-{interaction.user.name[:5]}-{applicant.name[:5]}", category=cat, overwrites=overwrites)
+        
+        await interaction.response.send_message(f"✅ Created room: {chan.name}")
+        await chan.send(f"👋 **Team Up!**\n{interaction.user.mention} 🤝 {applicant.mention}\nThis room is temporary.")
+        self.stop()
+
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.red)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🚫 Request denied.", ephemeral=True)
+        self.stop()
+
+@bot.tree.command(name="findteam", description="Find a team (Button System)")
+async def findteam(interaction: discord.Interaction, role: str, level: str):
+    if interaction.channel.id != CH_FIND_TEAM: return await interaction.response.send_message("❌ Wrong channel.", ephemeral=True)
+    
+    embed = discord.Embed(title="🎮 Looking for Team", color=discord.Color.orange())
+    embed.add_field(name="Player", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Role", value=role, inline=True)
+    embed.add_field(name="Level", value=level, inline=True)
+    embed.set_footer(text="Click button to request join")
+    
+    await interaction.response.send_message(embed=embed, view=JoinTeamView(interaction.user.id))
 
 # =========================================
 # 🛍️ UPGRADE COMMANDS (ADDUSER / ADDTIME)
@@ -533,102 +586,158 @@ async def prices(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # =========================================
-# 🛍️ SHOP & OTHER COMMANDS
+# 🔐 PRIVATE CHANNEL CREATION
 # =========================================
 
-@bot.tree.command(name="additem", description="Admin: Add item")
-async def additem(interaction: discord.Interaction, service: str, account_details: str, price: int):
-    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    col_items.insert_one({"service": service, "details": account_details, "price": price, "added_at": datetime.now(timezone.utc)})
-    await interaction.response.send_message(f"✅ Added **{service}** ({price} coins).", ephemeral=True)
+class RequestView(discord.ui.View):
+    def __init__(self, request_id, guest_ids):
+        super().__init__(timeout=None)
+        self.request_id = request_id
+        self.guest_ids = guest_ids
 
-@bot.tree.command(name="shop", description="View items")
-async def shop(interaction: discord.Interaction):
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        req = col_requests.find_one({"_id": self.request_id})
+        if not req: return await interaction.response.send_message("❌ Expired.", ephemeral=True)
+        if interaction.user.id not in self.guest_ids: return await interaction.response.send_message("❌ Not invited.", ephemeral=True)
+
+        await interaction.response.defer()
+        col_requests.delete_one({"_id": self.request_id})
+        
+        guild = interaction.guild
+        category = guild.get_channel(CAT_PRIVATE_ROOMS)
+        host = guild.get_member(req["host_id"])
+        
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False, connect=False),
+            host: discord.PermissionOverwrite(read_messages=True, send_messages=True, connect=True, speak=True),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, connect=True, speak=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, manage_channels=True)
+        }
+
+        try:
+            if req["type"] == "text":
+                chan = await guild.create_text_channel(req["name"], category=category, overwrites=overwrites)
+            else:
+                chan = await guild.create_voice_channel(req["name"], category=category, overwrites=overwrites)
+            
+            end_time = datetime.now(timezone.utc) + timedelta(hours=req['hours'])
+            timestamp = int(end_time.timestamp())
+
+            col_users.update_one({"_id": req["host_id"]}, {"$set": {"current_private_channel_id": chan.id}})
+            col_channels.insert_one({"channel_id": chan.id, "owner_id": req["host_id"], "type": req["type"], "end_time": end_time})
+
+            try: await interaction.message.edit(content=f"✅ **Created!** {chan.mention}\nAccepted by: {interaction.user.mention}", view=None, embed=None)
+            except: pass
+            
+            # Send MAIN MESSAGE and store ID
+            main_msg_content = (
+                f"🔒 **Private Channel**\n👑 **Owner:** {host.mention}\n👥 **Joined:** {host.mention}, {interaction.user.mention}\n"
+                f"📛 **Room:** {chan.name}\n⏰ **Expires:** <t:{timestamp}:R>\n\n"
+                f"➕ **Upgrades:**\n`/adduser @user` (100 coins)\n`/addtime hours` (100 coins/hr)"
+            )
+            main_msg = await chan.send(main_msg_content)
+            col_channels.update_one({"channel_id": chan.id}, {"$set": {"main_msg_id": main_msg.id}})
+
+        except Exception as e: await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in self.guest_ids: return await interaction.response.send_message("❌ Not invited.", ephemeral=True)
+        self.guest_ids.remove(interaction.user.id)
+        await interaction.response.send_message("🚫 Declined.", ephemeral=True)
+
+@bot.tree.command(name="makeprivatechannel", description="Request private channel")
+@app_commands.choices(channel_type=[app_commands.Choice(name="Text", value="text"), app_commands.Choice(name="Voice", value="voice")], duration=[app_commands.Choice(name="1 Hour", value=1), app_commands.Choice(name="2 Hours", value=2), app_commands.Choice(name="4 Hours", value=4)])
+@app_commands.describe(members="Mention users (Required)")
+async def makeprivate(interaction: discord.Interaction, channel_type: str, name: str, duration: int, members: str):
+    await interaction.response.defer(ephemeral=False)
+    try:
+        config = col_settings.find_one({"_id": "config"})
+        if config["panic"] and not is_admin(interaction.user.id): return await interaction.followup.send("🔒 Maintenance.")
+
+        uid = interaction.user.id
+        data = get_user_data(uid)
+        if data.get("current_private_channel_id") and not is_admin(uid): return await interaction.followup.send("❌ You already have a channel.")
+
+        guests = [int(id) for id in re.findall(r'<@!?(\d+)>', members)]
+        guests = list(set(guests))
+        if uid in guests: guests.remove(uid)
+        
+        if not guests: return await interaction.followup.send("❌ Mention at least 1 guest.")
+        total = len(guests) + 1
+        if total > 7: return await interaction.followup.send("❌ Max 7 users.")
+
+        try: price = PRICES[channel_type][total][duration]
+        except KeyError: return await interaction.followup.send("❌ Pricing Error.")
+
+        if data["coins"] < price: return await interaction.followup.send(f"❌ Need {price} coins.")
+
+        col_users.update_one({"_id": uid}, {"$inc": {"coins": -price}})
+        req_id = ObjectId()
+        
+        embed = discord.Embed(title=f"🔒 {channel_type.title()} Room Request", description=f"{interaction.user.mention} wants a room.\n**Guests:** {' '.join([f'<@{g}>' for g in guests])}\n**Price:** {price}\n**Duration:** {duration}h", color=discord.Color.gold())
+        msg = await interaction.followup.send(embed=embed, view=RequestView(req_id, guests))
+        col_requests.insert_one({"_id": req_id, "host_id": uid, "guests": guests, "type": channel_type, "name": name, "price": price, "hours": duration, "end_time": datetime.now(timezone.utc) + timedelta(hours=duration), "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5), "msg_id": msg.id, "msg_channel_id": interaction.channel.id})
+    except Exception as e:
+        await interaction.followup.send(f"❌ Unexpected Error: {e}")
+
+# =========================================
+# 💰 UTILS (INVITES, COINS, ADMIN)
+# =========================================
+
+@bot.tree.command(name="daily", description="Claim coins")
+async def daily(interaction: discord.Interaction):
     await interaction.response.defer()
-    pipeline = [{"$group": {"_id": "$service", "count": {"$sum": 1}, "price": {"$first": "$price"}}}]
-    items = list(col_items.aggregate(pipeline))
-    embed = discord.Embed(title="🛒 EG Coin Shop", description="Use `/buy [service]` to purchase.", color=discord.Color.green())
-    if not items: embed.description = "🚫 Out of Stock"
-    else:
-        for item in items: embed.add_field(name=f"📦 {item['_id']}", value=f"💰 {item['price']} Coins\n📊 Stock: {item['count']}", inline=False)
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="buy", description="Buy item")
-async def buy(interaction: discord.Interaction, service: str):
-    await interaction.response.defer(ephemeral=True)
-    config = col_settings.find_one({"_id": "config"})
-    if config["panic"] and not is_admin(interaction.user.id): return await interaction.followup.send("🔒 Shop Closed.")
-
     uid = interaction.user.id
-    user_data = get_user_data(uid)
-    item = col_items.find_one({"service": {"$regex": f"^{re.escape(service)}$", "$options": "i"}})
-    if not item: return await interaction.followup.send(f"❌ **{service}** not found.")
-    if user_data["coins"] < item["price"]: return await interaction.followup.send(f"❌ Need {item['price']} coins.")
+    d = get_user_data(uid)
+    now = datetime.now(timezone.utc)
+    if d.get("daily_cd") and not is_admin(uid):
+        daily_cd = d["daily_cd"].replace(tzinfo=timezone.utc) if d["daily_cd"].tzinfo is None else d["daily_cd"]
+        if now < daily_cd: return await interaction.followup.send(f"⏳ Come back in {int((daily_cd - now).total_seconds()//3600)}h.")
+    col_users.update_one({"_id": uid}, {"$inc": {"coins": 100}, "$set": {"daily_cd": now + timedelta(hours=24)}})
+    await interaction.followup.send(f"💰 +100 Coins!")
 
-    col_items.delete_one({"_id": item["_id"]})
-    col_users.update_one({"_id": uid}, {"$inc": {"coins": -item["price"]}})
-    
-    guild = interaction.guild
-    overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True)}
-    for a in ADMIN_IDS:
-        m = guild.get_member(a)
-        if m: overwrites[m] = discord.PermissionOverwrite(read_messages=True)
-
-    chan = await guild.create_text_channel(f"buy-{interaction.user.name[:10]}", overwrites=overwrites)
-    if bot.get_channel(CH_CODE_USE_LOG): await bot.get_channel(CH_CODE_USE_LOG).send(f"🛒 {interaction.user.mention} bought **{item['service']}**.")
-
-    col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": item["price"], "service": item["service"], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
-
-    embed = discord.Embed(title="🎁 Account Details", description="⏰ **Channel deletes in 30 mins**", color=discord.Color.green())
-    embed.add_field(name="Service", value=item['service'])
-    embed.add_field(name="Details", value=f"```\n{item['details']}\n```")
-    await chan.send(f"{interaction.user.mention}", embed=embed)
-    await chan.send(f"📢 **VOUCH:** `{item['price']} I got {item['service']}, thanks @admin`")
-    await interaction.followup.send(f"✅ Purchased! {chan.mention}")
-
-@bot.tree.command(name="stock", description="Admin: Check stock")
-async def stock(interaction: discord.Interaction):
+@bot.tree.command(name="lock", description="Admin: Lock")
+async def lock(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    pipeline = [{"$group": {"_id": "$service", "count": {"$sum": 1}}}]
-    items = list(col_items.aggregate(pipeline))
-    text = "**📊 Stock:**\n" + "\n".join([f"• {i['_id']}: {i['count']}" for i in items]) if items else "Empty."
-    await interaction.response.send_message(text, ephemeral=True)
+    if "redeem-" in interaction.channel.name or "buy-" in interaction.channel.name: return await interaction.response.send_message("❌ Cannot lock Redeem channels.", ephemeral=True)
+    if col_channels.find_one({"channel_id": interaction.channel.id}): return await interaction.response.send_message("❌ Cannot lock Private channels.", ephemeral=True)
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False, send_messages_in_threads=False, create_public_threads=False, create_private_threads=False)
+    role = discord.utils.get(interaction.guild.roles, name="Member")
+    if role: await interaction.channel.set_permissions(role, send_messages=False, send_messages_in_threads=False, create_public_threads=False, create_private_threads=False)
+    col_settings.update_one({"_id": "config"}, {"$set": {"locked": True}})
+    await interaction.response.send_message("🔒 Locked.")
 
-# ... (Previous commands: redeem, addcode, etc. all implicitly included)
-# To ensure they are present, I will paste the critical ones briefly:
+@bot.tree.command(name="unlock", description="Admin: Unlock")
+async def unlock(interaction: discord.Interaction):
+    if not is_admin(interaction.user.id): return
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=None, send_messages_in_threads=None, create_public_threads=None, create_private_threads=None)
+    role = discord.utils.get(interaction.guild.roles, name="Member")
+    if role: await interaction.channel.set_permissions(role, send_messages=None, send_messages_in_threads=None, create_public_threads=None, create_private_threads=None)
+    col_settings.update_one({"_id": "config"}, {"$set": {"locked": False}})
+    await interaction.response.send_message("🔓 Unlocked.")
 
-@bot.tree.command(name="redeem", description="Redeem code")
-async def redeem(interaction: discord.Interaction, code: str):
-    await interaction.response.defer(ephemeral=True)
-    config = col_settings.find_one({"_id": "config"})
-    if config["panic"] and not is_admin(interaction.user.id): return await interaction.followup.send("🔒 Maintenance.")
-    
-    uid = interaction.user.id
-    cd = col_codes.find_one({"code": code})
-    if not cd: return await interaction.followup.send("❌ Invalid.")
-    
-    col_codes.delete_one({"code": code})
-    guild = interaction.guild
-    overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True)}
-    for a in ADMIN_IDS:
-        m = guild.get_member(a)
-        if m: overwrites[m] = discord.PermissionOverwrite(read_messages=True)
-    
-    chan = await guild.create_text_channel(f"redeem-{interaction.user.name[:10]}", overwrites=overwrites)
-    col_vouch.insert_one({"channel_id": chan.id, "guild_id": guild.id, "user_id": uid, "code_used": code, "service": cd['service'], "start_time": datetime.now(timezone.utc), "warned_10": False, "warned_20": False})
-    
-    embed = discord.Embed(title="🎁 Account", description="⏰ **Deletes in 30 mins**", color=discord.Color.green())
-    embed.add_field(name="Service", value=cd['service'])
-    embed.add_field(name="Details", value=f"```\n{cd['email']} | {cd['password']}\n```")
-    await chan.send(f"{interaction.user.mention}", embed=embed)
-    await chan.send(f"📢 **VOUCH:** `{code} I got {cd['service']}, thanks @admin`")
-    await interaction.followup.send(f"✅ {chan.mention}")
-
-@bot.tree.command(name="addcode", description="Admin: Add code")
-async def addcode(interaction: discord.Interaction, code: str, service: str, email: str, password: str):
+@bot.tree.command(name="addcoins", description="Admin: Add coins to user")
+async def addcoins(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    col_codes.insert_one({"code": code, "service": service, "email": email, "password": password})
-    await interaction.response.send_message("✅ Added.", ephemeral=True)
+    get_user_data(user.id)
+    col_users.update_one({"_id": user.id}, {"$inc": {"coins": amount}})
+    await interaction.response.send_message(f"✅ Added {amount} to {user.mention}", ephemeral=True)
+
+@bot.tree.command(name="warn", description="Admin: Warn a user")
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    try: await user.send(f"⚠️ **Warned in {interaction.guild.name}**\nReason: {reason}")
+    except: pass
+    warn_channel = bot.get_channel(CH_WARNINGS)
+    if warn_channel:
+        embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.orange())
+        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
+        embed.add_field(name="Admin", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        await warn_channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Warned {user.mention}.", ephemeral=True)
 
 @bot.tree.command(name="ann", description="Admin: Announce")
 async def ann(interaction: discord.Interaction, title: str, message: str):
@@ -643,19 +752,12 @@ async def clear(interaction: discord.Interaction, amount: int):
     await interaction.channel.purge(limit=min(amount, 100))
     await interaction.followup.send("🧹 Done", ephemeral=True)
 
-@bot.tree.command(name="lock", description="Admin: Lock")
-async def lock(interaction: discord.Interaction):
+@bot.tree.command(name="panic", description="Admin: Panic")
+async def panic(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return
-    if "redeem-" in interaction.channel.name or "buy-" in interaction.channel.name: return await interaction.response.send_message("❌ Cannot lock Redeem channels.", ephemeral=True)
-    if col_channels.find_one({"channel_id": interaction.channel.id}): return await interaction.response.send_message("❌ Cannot lock Private channels.", ephemeral=True)
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
-    await interaction.response.send_message("🔒 Locked.")
-
-@bot.tree.command(name="unlock", description="Admin: Unlock")
-async def unlock(interaction: discord.Interaction):
-    if not is_admin(interaction.user.id): return
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=None)
-    await interaction.response.send_message("🔓 Unlocked.")
+    c = col_settings.find_one({"_id": "config"})
+    col_settings.update_one({"_id": "config"}, {"$set": {"panic": not c["panic"]}})
+    await interaction.response.send_message(f"🚨 Panic: {not c['panic']}", ephemeral=True)
 
 @bot.tree.command(name="removecoins", description="Admin: Remove coins")
 async def removecoins(interaction: discord.Interaction, user: discord.Member, amount: int):
@@ -663,39 +765,24 @@ async def removecoins(interaction: discord.Interaction, user: discord.Member, am
     col_users.update_one({"_id": user.id}, {"$inc": {"coins": -amount}})
     await interaction.response.send_message(f"✅ Removed {amount} from {user.mention}", ephemeral=True)
 
-@bot.tree.command(name="close", description="Close current ticket/redeem")
-async def close(interaction: discord.Interaction):
-    # Check if channel is closeable (ticket, redeem, buy)
-    if not any(x in interaction.channel.name for x in ["ticket-", "redeem-", "buy-"]):
-        return await interaction.response.send_message("❌ This command only works in Ticket/Redeem channels.", ephemeral=True)
+@bot.tree.command(name="profile", description="Check Stats")
+async def profile(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    d = get_user_data(target.id)
+    embed = discord.Embed(title=f"👤 {target.name}", color=discord.Color.blue())
+    embed.add_field(name="💰 Coins", value=d['coins'])
+    embed.add_field(name="🏆 Wins", value=d['wins'])
+    embed.add_field(name="🔥 Streak", value=d['streak'])
+    embed.add_field(name="⭐ MVPs", value=d['mvp_count'])
     
-    await interaction.response.send_message("👋 Closing in 5 seconds...")
-    await asyncio.sleep(5)
-    await interaction.channel.delete()
-
-@bot.tree.command(name="ticketpanel", description="Admin: Send ticket panel")
-async def ticketpanel(interaction: discord.Interaction):
-    if not is_admin(interaction.user.id): return
-    
-    class TicketView(discord.ui.View):
-        def __init__(self): super().__init__(timeout=None)
-        @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.green, custom_id="tic_open")
-        async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-            ow = {
-                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                interaction.guild.me: discord.PermissionOverwrite(read_messages=True, manage_channels=True)
-            }
-            for aid in ADMIN_IDS:
-                m = interaction.guild.get_member(aid)
-                if m: ow[m] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            
-            c = await interaction.guild.create_text_channel(f"ticket-{interaction.user.name}", overwrites=ow, topic=f"Ticket Owner: {interaction.user.id}")
-            await c.send(f"{interaction.user.mention} Support will be with you shortly. Use `/close` to close.", view=None)
-            await interaction.response.send_message(f"✅ Created: {c.mention}", ephemeral=True)
-
-    await interaction.channel.send("📩 **Need Help?** Click below.", view=TicketView())
-    await interaction.response.send_message("✅ Panel Sent", ephemeral=True)
+    # 🆕 Show Team Name
+    if d.get("team_id"):
+        team = col_teams.find_one({"_id": d["team_id"]})
+        if team: embed.add_field(name="🛡️ Team", value=team["name"])
+    else:
+        embed.add_field(name="🛡️ Team", value="None")
+        
+    await interaction.response.send_message(embed=embed)
 
 @bot.event
 async def on_message(message):
