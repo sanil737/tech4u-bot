@@ -124,7 +124,7 @@ class EGBot(commands.Bot):
                 invs = await guild.invites()
                 self.invite_cache[guild.id] = {inv.code: inv.uses for inv in invs}
                 
-                # Auto Create Role (Fixed 'hoist' param)
+                # Auto Create Role
                 role = discord.utils.get(guild.roles, name=HELPER_ROLE_NAME)
                 if not role:
                     try:
@@ -184,6 +184,7 @@ class EGBot(commands.Bot):
                     if warning_channel and user:
                         embed = discord.Embed(title="⚠️ Failed to Vouch", description=f"{user.mention} did not vouch for **{p['service']}** in time.", color=discord.Color.orange())
                         await warning_channel.send(embed=embed)
+
                     await channel.send("🔒 **Time expired. Deleting channel in 2 seconds...**")
                     await asyncio.sleep(2)
                     await channel.delete(reason="Redeem time expired")
@@ -341,7 +342,6 @@ async def makerole(interaction: discord.Interaction):
     if not is_admin(interaction.user.id): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     role = discord.utils.get(interaction.guild.roles, name=HELPER_ROLE_NAME)
     if role: return await interaction.response.send_message("✅ Role exists.", ephemeral=True)
-    # FIXED: Replaced hover=True with hoist=True
     await interaction.guild.create_role(name=HELPER_ROLE_NAME, color=discord.Color.gold(), hoist=True)
     await interaction.response.send_message(f"✅ Created role: **{HELPER_ROLE_NAME}**", ephemeral=True)
 
@@ -353,7 +353,7 @@ async def make(interaction: discord.Interaction, user: discord.Member):
     await user.add_roles(role)
     await interaction.response.send_message(f"✅ {user.mention} is now a Helper!", ephemeral=True)
 
-@bot.tree.command(name="winner", description="Submit Match Result")
+@bot.tree.command(name="winner", description="Submit Match Result (Admin/Helper)")
 async def winner(interaction: discord.Interaction, gameid: str, winner: discord.Member, score: str):
     if not is_helper(interaction): return await interaction.response.send_message("❌ Admin/Helper only.", ephemeral=True)
     
@@ -504,7 +504,7 @@ async def payteamrent(interaction: discord.Interaction):
     await interaction.response.send_message(f"✅ Paid {TEAM_CHANNEL_RENT} coins.")
 
 # =========================================
-# ⚔️ TOURNAMENTS
+# ⚔️ TOURNAMENTS & RESULTS
 # =========================================
 
 @bot.tree.command(name="createtournament", description="Admin: Create tournament")
@@ -568,7 +568,7 @@ async def submitresults(interaction: discord.Interaction, tournament_id: str, da
     await interaction.followup.send("✅ Results posted.")
 
 # =========================================
-# 1v1 MATCH
+# ⚔️ 1v1 MATCH & BOOSTS
 # =========================================
 
 class AcceptMatchView(discord.ui.View):
@@ -583,7 +583,7 @@ class AcceptMatchView(discord.ui.View):
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         opponent = interaction.user
         challenger = interaction.guild.get_member(self.challenger_id)
-        if opponent.id == self.challenger_id: return await interaction.response.send_message("❌ No.", ephemeral=True)
+        if opponent.id == self.challenger_id: return await interaction.response.send_message("❌ Cannot accept own challenge.", ephemeral=True)
         col_users.update_one({"_id": challenger.id}, {"$inc": {"coins": -self.amount}})
         col_users.update_one({"_id": opponent.id}, {"$inc": {"coins": -self.amount}})
         guild = interaction.guild
@@ -686,7 +686,7 @@ class AddUserView(discord.ui.View):
 async def adduser(interaction: discord.Interaction, user: discord.Member):
     c_data = col_channels.find_one({"channel_id": interaction.channel.id})
     if not c_data or interaction.user.id != c_data["owner_id"]: return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    if user.id == interaction.user.id or user.bot: return await interaction.response.send_message("❌ Invalid user.", ephemeral=True)
+    if user.id == interaction.user.id or user.bot: return await interaction.response.send_message("❌ Invalid.", ephemeral=True)
     data = get_user_data(interaction.user.id)
     if data["coins"] < COST_ADD_USER: return await interaction.response.send_message(f"❌ Need {COST_ADD_USER} coins.", ephemeral=True)
     await interaction.channel.set_permissions(user, read_messages=True, send_messages=False, connect=False)
@@ -963,9 +963,9 @@ class AcceptTeamRequestView(discord.ui.View):
 async def findteam(interaction: discord.Interaction, role: str, level: str):
     if interaction.channel.id != CH_FIND_TEAM: return await interaction.response.send_message("❌ Wrong channel.", ephemeral=True)
     embed = discord.Embed(title="🎮 Looking for Team", color=discord.Color.orange())
-    embed.add_field(name="Player", value=interaction.user.mention)
-    embed.add_field(name="Role", value=role)
-    embed.add_field(name="Level", value=level)
+    embed.add_field(name="Player", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Role", value=role, inline=True)
+    embed.add_field(name="Level", value=level, inline=True)
     embed.set_footer(text="Click to request join")
     await interaction.response.send_message(embed=embed, view=JoinTeamView(interaction.user.id))
 
